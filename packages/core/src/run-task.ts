@@ -8,6 +8,7 @@ import { type AgentRole, buildProjectContext, loadProjectConfig, type ProjectCon
 import { computeRiskClass, countChangedLines, matchesAny, maxRiskClass } from "./risk.js";
 import { type ClaudeUsage, runClaude, type RunClaudeOptions, type RunClaudeResult } from "./run-claude.js";
 import { extractCitedSources, formatCitedSources } from "./sources.js";
+import { runLogPath } from "./task-runs.js";
 import { loadTaskFile, type TaskFile } from "./task-file.js";
 import { transition } from "./transition.js";
 import type { Task, TaskEvent, TaskState } from "./types.js";
@@ -89,7 +90,7 @@ export async function runTask(projectPath: string, taskFile: string, options: Ru
   const config = await loadProjectConfig(projectPath);
   const taskDef = await loadTaskFile(taskFile);
   const runId = randomUUID();
-  const logPath = join(projectPath, ".loop", "runs", taskDef.id, `${runId}.json`);
+  const logPath = runLogPath(projectPath, taskDef.id, runId);
   const run = new TaskRun(projectPath, config, taskDef, runId, logPath, taskFile, options);
   return run.execute();
 }

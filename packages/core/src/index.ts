@@ -29,3 +29,4 @@ export type { TaskFile } from "./task-file.js";
 export { loadTaskFile, TaskFileError, TaskFileSchema } from "./task-file.js";
 export type { RunLog, RunStep, RunTaskOptions, RunTaskResult, TransitionLogEntry } from "./run-task.js";
 export { runTask, RunTaskError } from "./run-task.js";
+export { latestTask, listRuns, MergeConflictError, mergeTask, runLogPath, TaskNotFoundError } from "./task-runs.js";

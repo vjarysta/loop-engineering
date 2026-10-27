@@ -1,154 +1,29 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AgentRole } from "./project-config.js";
-import type { RunClaudeOptions, RunClaudeResult } from "./run-claude.js";
 import { type RunLog, runTask } from "./run-task.js";
+import {
+  approveStep as approve,
+  badImplementerStep as bad,
+  changesStep as changes,
+  cleanupFixtures,
+  FIXTURE_CHECK as CHECK,
+  FIXTURE_SPEC_PATH as SPEC_PATH,
+  FIXTURE_TASK_ID as TASK_ID,
+  git,
+  goodImplementerStep as good,
+  implementerStep as implementer,
+  isolateGitEnv,
+  makeFixtureProject as makeProject,
+  plannerStep as planner,
+  type ScriptedCall as Call,
+  scriptedClaude,
+} from "./testing.js";
 import { worktreePath } from "./worktree.js";
 
-const tmpDirs: string[] = [];
-
-afterAll(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-});
-
-beforeAll(() => {
-  // Isolate from the developer's git config (signing, hooks, default branch…).
-  const configDir = mkdtempSync(join(tmpdir(), "git-config-"));
-  tmpDirs.push(configDir);
-  const globalConfig = join(configDir, "gitconfig");
-  writeFileSync(globalConfig, "");
-  process.env["GIT_CONFIG_GLOBAL"] = globalConfig;
-  process.env["GIT_CONFIG_NOSYSTEM"] = "1";
-  process.env["GIT_AUTHOR_NAME"] = "Test";
-  process.env["GIT_AUTHOR_EMAIL"] = "test@example.com";
-  process.env["GIT_COMMITTER_NAME"] = "Test";
-  process.env["GIT_COMMITTER_EMAIL"] = "test@example.com";
-});
-
-const TASK_ID = "task-1";
-const SPEC_PATH = `.loop/specs/${TASK_ID}.md`;
-const CHECK = "grep -q good feature.txt || { echo 'feature.txt must contain good'; exit 1; }";
-const PRD = "# PRD\n## Feature\nfeature.txt says good.\n## Other\nUnrelated requirement.\n";
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-}
-
-function writeFile(root: string, path: string, content: string): void {
-  mkdirSync(dirname(join(root, path)), { recursive: true });
-  writeFileSync(join(root, path), content);
-}
-
-interface Fixture {
-  readonly project: string;
-  readonly taskFile: string;
-}
-
-function makeProject(config: Record<string, unknown> = {}): Fixture {
-  const parent = realpathSync(mkdtempSync(join(tmpdir(), "run-task-")));
-  tmpDirs.push(parent);
-  const project = join(parent, "project");
-  mkdirSync(project);
-  git(project, "init", "-q", "-b", "main");
-  writeFile(
-    project,
-    ".loop/config.json",
-    JSON.stringify({
-      check: CHECK,
-      protectedPaths: ["secrets/**"],
-      sourcesOfTruth: [{ path: "docs/PRD.md", description: "Product requirements" }],
-      agents: { implementer: { model: "sonnet" } },
-      ...config,
-    }),
-  );
-  writeFile(project, "docs/PRD.md", PRD);
-  writeFile(project, "feature.txt", "todo\n");
-  git(project, "add", "-A");
-  git(project, "commit", "-q", "-m", "initial");
-
-  const taskFile = join(parent, "task.json");
-  writeFileSync(
-    taskFile,
-    JSON.stringify({ id: TASK_ID, title: "Say good", description: "Implement docs/PRD.md#feature." }),
-  );
-  return { project, taskFile };
-}
-
-// ---- Scripted runClaude --------------------------------------------------------------------------------------
-
-interface Step {
-  readonly role: AgentRole;
-  /** Side effect in the agent's cwd (writing the spec, editing files…). */
-  readonly act?: (cwd: string) => void;
-  readonly output: string;
-}
-
-interface Call {
-  readonly role: AgentRole;
-  readonly options: RunClaudeOptions;
-}
-
-function scriptedClaude(steps: readonly Step[]): {
-  readonly runClaude: (options: RunClaudeOptions, role: AgentRole) => Promise<RunClaudeResult>;
-  readonly calls: Call[];
-} {
-  const queue = [...steps];
-  const calls: Call[] = [];
-  return {
-    calls,
-    runClaude: (options, role) => {
-      calls.push({ role, options });
-      const step = queue.shift();
-      if (step?.role !== role) {
-        return Promise.reject(new Error(`unexpected ${role} call, script expected ${step?.role ?? "nothing"}`));
-      }
-      step.act?.(options.cwd);
-      return Promise.resolve({
-        resultText: step.output,
-        usage: { inputTokens: 10, outputTokens: 20, cacheCreationInputTokens: 30, cacheReadInputTokens: 40 },
-        costUsd: 0.01,
-        durationMs: 100,
-        raw: { result: step.output },
-      });
-    },
-  };
-}
-
-const planner = (riskClass = "low"): Step => ({
-  role: "planner",
-  act: (cwd) => {
-    writeFile(cwd, SPEC_PATH, "# Spec\nCites docs/PRD.md#feature.\n## Test plan\n- check: feature.txt contains good\n");
-  },
-  output:
-    "Spec written.\n```json\n" +
-    JSON.stringify({ specPath: SPEC_PATH, riskClass, impactedFiles: ["feature.txt"], notes: "" }) +
-    "\n```",
-});
-
-const implementer = (files: Readonly<Record<string, string | null>>): Step => ({
-  role: "implementer",
-  act: (cwd) => {
-    for (const [path, content] of Object.entries(files)) {
-      if (content === null) rmSync(join(cwd, path));
-      else writeFile(cwd, path, content);
-    }
-  },
-  output: "Done.",
-});
-
-const good = implementer({ "feature.txt": "good\n" });
-const bad = implementer({ "feature.txt": "bad\n" });
-const approve: Step = { role: "reviewer", output: JSON.stringify({ verdict: "approve", issues: [] }) };
-const changes: Step = {
-  role: "reviewer",
-  output: JSON.stringify({
-    verdict: "changes",
-    issues: [{ file: "feature.txt", line: 1, severity: "major", message: "Say it louder" }],
-  }),
-};
+beforeAll(isolateGitEnv);
+afterAll(cleanupFixtures);
 
 function readLog(logPath: string): RunLog {
   return JSON.parse(readFileSync(logPath, "utf8")) as RunLog;
