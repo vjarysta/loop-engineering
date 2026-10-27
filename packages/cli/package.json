@@ -1,0 +1,16 @@
+{
+  "name": "@loop-engineering/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "loop": "./dist/index.js"
+  },
+  "files": ["dist"],
+  "dependencies": {
+    "@loop-engineering/core": "workspace:*"
+  }
+}
