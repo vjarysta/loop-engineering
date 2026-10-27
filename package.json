@@ -12,12 +12,14 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
+    "try:claude": "tsc -b tsconfig.build.json && node packages/core/scripts/try-run-claude.mjs",
     "clean": "tsc -b tsconfig.build.json --clean"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.20.5",
     "eslint": "^10.13.0",
+    "globals": "^17.13.0",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.72.1",
     "vitest": "^5.0.5"
