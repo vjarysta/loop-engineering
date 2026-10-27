@@ -184,6 +184,33 @@ describe("worktree.merge", () => {
   });
 });
 
+describe("worktree.commitAll", () => {
+  it("commits every change in the worktree, untracked and deleted files included", async () => {
+    const repo = initRepo();
+    commitFile(repo, "to-delete.txt", "bye\n");
+    const path = await worktree.create(repo, "task-1");
+    writeFileSync(join(path, "README.md"), "edited\n");
+    writeFileSync(join(path, "new.txt"), "new\n");
+    rmSync(join(path, "to-delete.txt"));
+
+    expect(await worktree.commitAll(repo, "task-1", "task-1: work")).toBe(true);
+
+    expect(git(path, "status", "--porcelain")).toBe("");
+    expect(git(path, "log", "-1", "--format=%s")).toBe("task-1: work");
+    expect(await worktree.changedFiles(repo, "task-1")).toEqual(["README.md", "new.txt", "to-delete.txt"]);
+  });
+
+  it("creates no commit when nothing changed", async () => {
+    const repo = initRepo();
+    const path = await worktree.create(repo, "task-1");
+    const headBefore = git(path, "rev-parse", "HEAD");
+
+    expect(await worktree.commitAll(repo, "task-1", "task-1: nothing")).toBe(false);
+
+    expect(git(path, "rev-parse", "HEAD")).toBe(headBefore);
+  });
+});
+
 describe("worktree.remove", () => {
   it("removes the worktree directory and the task branch, even with uncommitted changes", async () => {
     const repo = initRepo();

@@ -6,7 +6,7 @@ const execFileAsync = promisify(execFile);
 
 const MAIN_BRANCH = "main";
 // Letters, digits, "-" and "_": safe in a branch name and a path segment, never an option.
-const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+export const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 export class InvalidTaskIdError extends Error {
   override readonly name = "InvalidTaskIdError";
@@ -91,6 +91,19 @@ export async function merge(projectPath: string, taskId: string): Promise<MergeR
 
   const commit = (await git(projectPath, ["rev-parse", "HEAD"])).trim();
   return { status: "merged", commit };
+}
+
+/**
+ * Commits every change of the worktree on the task branch. Returns false when there was nothing to commit.
+ * Hooks are skipped: the orchestrator runs the project checks itself.
+ */
+export async function commitAll(projectPath: string, taskId: string, message: string): Promise<boolean> {
+  assertTaskId(taskId);
+  const path = worktreePath(projectPath, taskId);
+  await git(path, ["add", "-A"]);
+  if ((await git(path, ["status", "--porcelain"])) === "") return false;
+  await git(path, ["commit", "-q", "--no-verify", "-m", message]);
+  return true;
 }
 
 /** Discards the worktree, uncommitted changes included, and deletes the task branch. */

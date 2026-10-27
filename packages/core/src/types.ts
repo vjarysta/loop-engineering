@@ -37,17 +37,3 @@ export interface Task {
   /** Number of review change requests sent back to in_progress. */
   readonly reviewIterations: number;
 }
-
-export type Verdict =
-  | { readonly source: "checks"; readonly outcome: "pass" | "fail" }
-  | { readonly source: "review"; readonly outcome: "approve" | "changes" };
-
-export interface Run {
-  readonly id: string;
-  readonly taskId: string;
-  /** ISO 8601 timestamp. */
-  readonly startedAt: string;
-  /** ISO 8601 timestamp, null while the run is ongoing. */
-  readonly finishedAt: string | null;
-  readonly verdict: Verdict | null;
-}

@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { type ProcessOutput, runProcess } from "./process.js";
 
 export interface RunClaudeOptions {
   readonly cwd: string;
@@ -7,6 +7,8 @@ export interface RunClaudeOptions {
   readonly timeoutMs: number;
   /** Its content is passed to --append-system-prompt. */
   readonly systemPromptFile?: string;
+  /** Passed to --append-system-prompt, after the content of systemPromptFile. */
+  readonly appendSystemPrompt?: string;
   readonly model?: string;
   readonly allowedTools?: readonly string[];
   /** Delay between SIGTERM and SIGKILL on timeout. */
@@ -61,12 +63,27 @@ export class ClaudeRunError extends Error {
   }
 }
 
-const DEFAULT_KILL_GRACE_MS = 5000;
-
 export async function runClaude(options: RunClaudeOptions): Promise<RunClaudeResult> {
   const args = await buildArgs(options);
-  const { stdout, stderr, exitCode } = await spawnWithTimeout(options, args);
+  let output: ProcessOutput;
+  try {
+    output = await runProcess({
+      command: options.bin ?? "claude",
+      args,
+      cwd: options.cwd,
+      input: options.prompt,
+      timeoutMs: options.timeoutMs,
+      ...(options.killGraceMs !== undefined && { killGraceMs: options.killGraceMs }),
+    });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    throw new ClaudeRunError("spawn", `failed to spawn claude: ${message}`, { cause });
+  }
 
+  const { stdout, stderr, exitCode, timedOut } = output;
+  if (timedOut) {
+    throw new ClaudeRunError("timeout", `claude timed out after ${String(options.timeoutMs)}ms`, { stderr });
+  }
   if (exitCode !== 0) {
     throw new ClaudeRunError("exit", `claude exited with code ${String(exitCode)}`, { exitCode, stderr });
   }
@@ -78,72 +95,18 @@ async function buildArgs(options: RunClaudeOptions): Promise<string[]> {
   if (options.model !== undefined) {
     args.push("--model", options.model);
   }
-  if (options.systemPromptFile !== undefined) {
-    args.push("--append-system-prompt", await readFile(options.systemPromptFile, "utf8"));
+  const systemPrompt = [
+    options.systemPromptFile === undefined ? undefined : await readFile(options.systemPromptFile, "utf8"),
+    options.appendSystemPrompt,
+  ].filter((part) => part !== undefined);
+  if (systemPrompt.length > 0) {
+    args.push("--append-system-prompt", systemPrompt.join("\n\n"));
   }
   // --allowedTools is variadic: it must come last so it cannot swallow other arguments.
   if (options.allowedTools !== undefined && options.allowedTools.length > 0) {
     args.push("--allowedTools", ...options.allowedTools);
   }
   return args;
-}
-
-interface ProcessOutput {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number | null;
-}
-
-function spawnWithTimeout(options: RunClaudeOptions, args: readonly string[]): Promise<ProcessOutput> {
-  return new Promise((resolve, reject) => {
-    // detached: the child leads its own process group, so the whole tree can be killed at once.
-    const child = spawn(options.bin ?? "claude", args, { cwd: options.cwd, detached: true, stdio: "pipe" });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let killTimer: NodeJS.Timeout | undefined;
-
-    const killGroup = (signal: NodeJS.Signals): void => {
-      if (child.pid === undefined) return;
-      try {
-        process.kill(-child.pid, signal);
-      } catch {
-        // The group is already gone.
-      }
-    };
-
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      killGroup("SIGTERM");
-      killTimer = setTimeout(() => {
-        killGroup("SIGKILL");
-      }, options.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
-    }, options.timeoutMs);
-
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-    // The child may exit before reading stdin; the resulting EPIPE is reported through exit/close.
-    child.stdin.on("error", () => undefined);
-    child.stdin.end(options.prompt);
-
-    child.on("error", (cause) => {
-      clearTimeout(timeoutTimer);
-      clearTimeout(killTimer);
-      reject(new ClaudeRunError("spawn", `failed to spawn claude: ${cause.message}`, { cause }));
-    });
-
-    child.on("close", (exitCode) => {
-      clearTimeout(timeoutTimer);
-      if (timedOut) {
-        // Make sure nothing in the group outlives the leader, then report the timeout.
-        killGroup("SIGKILL");
-        clearTimeout(killTimer);
-        reject(new ClaudeRunError("timeout", `claude timed out after ${String(options.timeoutMs)}ms`, { stderr }));
-        return;
-      }
-      resolve({ stdout, stderr, exitCode });
-    });
-  });
 }
 
 function parseOutput(stdout: string, stderr: string): RunClaudeResult {

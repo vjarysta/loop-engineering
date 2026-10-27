@@ -82,6 +82,29 @@ describe("runClaude — invocation", () => {
     ]);
   });
 
+  it("appends an inline system prompt", async () => {
+    expect((await echo({ appendSystemPrompt: "Inline rules." })).args).toEqual([
+      "-p",
+      "--output-format",
+      "json",
+      "--append-system-prompt",
+      "Inline rules.",
+    ]);
+  });
+
+  it("appends the file content then the inline system prompt in a single flag", async () => {
+    const file = join(makeTmpDir(), "system.md");
+    writeFileSync(file, "From file.");
+
+    expect((await echo({ systemPromptFile: file, appendSystemPrompt: "Inline rules." })).args).toEqual([
+      "-p",
+      "--output-format",
+      "json",
+      "--append-system-prompt",
+      "From file.\n\nInline rules.",
+    ]);
+  });
+
   it("passes allowed tools last, one argument each, so they cannot swallow other flags", async () => {
     const args = (await echo({ model: "haiku", allowedTools: ["Read", "Bash(git *)"] })).args;
 
