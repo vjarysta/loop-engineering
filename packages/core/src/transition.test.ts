@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { InvalidTransitionError, transition } from "./transition.js";
 import type { Task, TaskEvent, TaskState } from "./types.js";
 
+/** The default budgets of the spec: 3 check retries, 2 review retries. */
+const BUDGETS = { checkIterations: 3, reviewIterations: 2 };
+
 const STATES: readonly TaskState[] = [
   "proposed",
   "approved",
@@ -126,19 +129,19 @@ describe("transition — valid transitions", () => {
   it.each(VALID)("$name: $from.state --$event--> $to.state", ({ from, event, to }) => {
     const task = makeTask(from);
 
-    expect(transition(task, event)).toEqual({ ...task, ...to });
+    expect(transition(task, event, BUDGETS)).toEqual({ ...task, ...to });
   });
 
   it("keeps the counters untouched outside of retry loops", () => {
     const task = makeTask({ state: "checks", checkIterations: 2, reviewIterations: 1 });
 
-    expect(transition(task, "checks_passed")).toEqual({ ...task, state: "in_review" });
+    expect(transition(task, "checks_passed", BUDGETS)).toEqual({ ...task, state: "in_review" });
   });
 
   it("does not mutate the input task", () => {
     const task = makeTask({ state: "checks", checkIterations: 1 });
 
-    const next = transition(task, "checks_failed");
+    const next = transition(task, "checks_failed", BUDGETS);
 
     expect(next).not.toBe(task);
     expect(task).toEqual(makeTask({ state: "checks", checkIterations: 1 }));
@@ -156,24 +159,48 @@ describe("transition — invalid transitions", () => {
   });
 
   it.each(invalid)("$state --$event--> throws", ({ state, event }) => {
-    expect(() => transition(makeTask({ state }), event)).toThrow(InvalidTransitionError);
+    expect(() => transition(makeTask({ state }), event, BUDGETS)).toThrow(InvalidTransitionError);
   });
 
   it.each(["merged", "rejected", "cancelled"] as const)("terminal state %s accepts no event", (state) => {
     for (const event of EVENTS) {
-      expect(() => transition(makeTask({ state }), event)).toThrow(InvalidTransitionError);
+      expect(() => transition(makeTask({ state }), event, BUDGETS)).toThrow(InvalidTransitionError);
     }
   });
 
   it("reports the offending state and event on the error", () => {
     let error: unknown;
     try {
-      transition(makeTask({ state: "merged" }), "start");
+      transition(makeTask({ state: "merged" }), "start", BUDGETS);
     } catch (e) {
       error = e;
     }
 
     expect(error).toBeInstanceOf(InvalidTransitionError);
     expect(error).toMatchObject({ state: "merged", event: "start" });
+  });
+});
+
+describe("transition — configurable budgets", () => {
+  const budgets = { checkIterations: 1, reviewIterations: 1 };
+
+  it.each([
+    [{ state: "checks", checkIterations: 0 }, "checks_failed", { state: "in_progress", checkIterations: 1 }],
+    [{ state: "checks", checkIterations: 1 }, "checks_failed", { state: "escalated", checkIterations: 1 }],
+    [{ state: "in_review", reviewIterations: 0 }, "request_changes", { state: "in_progress", reviewIterations: 1 }],
+    [{ state: "in_review", reviewIterations: 1 }, "request_changes", { state: "escalated", reviewIterations: 1 }],
+  ] as const)("with budgets 1/1: %j --%s--> %j", (from, event, to) => {
+    const task = makeTask(from);
+
+    expect(transition(task, event, budgets)).toEqual({ ...task, ...to });
+  });
+
+  it("allows more retries with a larger budget", () => {
+    const task = makeTask({ state: "checks", checkIterations: 3 });
+
+    expect(transition(task, "checks_failed", { checkIterations: 5, reviewIterations: 2 })).toMatchObject({
+      state: "in_progress",
+      checkIterations: 4,
+    });
   });
 });

@@ -22,11 +22,11 @@ export function headingSlug(heading: string): string {
 /** Finds the `<path>` and `<path>#<anchor>` citations of the sources of truth in `text` and loads them. */
 export async function extractCitedSources(
   text: string,
-  sources: ProjectConfig["sourcesOfTruth"],
+  sources: ProjectConfig["agents"]["sourcesOfTruth"],
   projectPath: string,
 ): Promise<CitedSource[]> {
   const citations = sources
-    .flatMap(({ path }) =>
+    .flatMap((path) =>
       [...text.matchAll(new RegExp(`${escapeRegExp(path)}(?:#([\\p{L}\\p{N}_-]+))?`, "gu"))].map((match) => ({
         path,
         anchor: match[1] ?? null,

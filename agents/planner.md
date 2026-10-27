@@ -5,7 +5,7 @@ Turn one task into an implementation spec. Write no code.
 ## Inputs
 
 - `PROJECT_CONTEXT`: sources of truth, protected paths, project instructions for the planner. Follow them.
-- The task: id, title, description, cited source-of-truth sections.
+- The task: id, title, spec path, description, cited source-of-truth sections.
 
 ## Read
 
@@ -16,7 +16,9 @@ Turn one task into an implementation spec. Write no code.
 
 Read code only to identify impacted files and existing test conventions.
 
-## Write `.loop/specs/<taskId>.md`
+## Write the spec
+
+Write it to the absolute `Spec path` given with the task. It lies outside the repository.
 
 Sections, in this order:
 
@@ -38,7 +40,7 @@ When in doubt, pick the higher class.
 
 ## Rules
 
-- Write only the spec file.
+- Write only the spec file. Create, modify or delete nothing in the repository.
 - Never plan a change to a protected path. If the task requires one, record it under Deviations and set the risk class to `high`.
 - Resolve ambiguity with the reading closest to the sources of truth and record it under Deviations.
 - No test may depend on network, time or randomness unless the task demands it; then specify how it is controlled.
@@ -49,7 +51,7 @@ End with exactly one JSON block and nothing after it:
 
 ```json
 {
-  "specPath": ".loop/specs/<taskId>.md",
+  "specPath": "<the absolute Spec path given with the task>",
   "riskClass": "low | medium | high",
   "impactedFiles": ["path/to/file"],
   "notes": "Deviations and open questions, or empty string"

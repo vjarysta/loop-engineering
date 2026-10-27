@@ -1,10 +1,11 @@
 export type { RiskClass, Task, TaskEvent, TaskState } from "./types.js";
-export { InvalidTransitionError, MAX_CHECK_ITERATIONS, MAX_REVIEW_ITERATIONS, transition } from "./transition.js";
+export { InvalidTransitionError, transition } from "./transition.js";
 export type { ClaudeRunErrorKind, ClaudeUsage, RunClaudeOptions, RunClaudeResult } from "./run-claude.js";
 export { ClaudeRunError, runClaude } from "./run-claude.js";
 export * as worktree from "./worktree.js";
-export type { AgentConfig, AgentRole, ProjectConfig, RiskRules } from "./project-config.js";
+export type { AgentRole, Budgets, ProjectConfig, RiskRules } from "./project-config.js";
 export {
+  AGENT_ROLES,
   buildProjectContext,
   CONFIG_PATH,
   loadProjectConfig,
@@ -29,4 +30,13 @@ export type { TaskFile } from "./task-file.js";
 export { loadTaskFile, TaskFileError, TaskFileSchema } from "./task-file.js";
 export type { RunLog, RunStep, RunTaskOptions, RunTaskResult, TransitionLogEntry } from "./run-task.js";
 export { runTask, RunTaskError } from "./run-task.js";
-export { latestTask, listRuns, MergeConflictError, mergeTask, runLogPath, TaskNotFoundError } from "./task-runs.js";
+export {
+  DEFAULT_RUNS_DIR,
+  latestTask,
+  listRuns,
+  MergeConflictError,
+  mergeTask,
+  runLogPath,
+  specFilePath,
+  TaskNotFoundError,
+} from "./task-runs.js";

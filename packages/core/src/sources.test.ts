@@ -33,7 +33,7 @@ function makeProject(): string {
   return dir;
 }
 
-const SOURCES = [{ path: "docs/PRD.md" }, { path: "docs/API.md" }];
+const SOURCES = ["docs/PRD.md", "docs/API.md"];
 
 describe("headingSlug", () => {
   it.each([
@@ -93,7 +93,7 @@ describe("extractCitedSources", () => {
   it("reports an unknown anchor or a missing file with null content", async () => {
     const spec = "docs/PRD.md#nope and docs/MISSING.md";
 
-    expect(await extractCitedSources(spec, [...SOURCES, { path: "docs/MISSING.md" }], makeProject())).toEqual([
+    expect(await extractCitedSources(spec, [...SOURCES, "docs/MISSING.md"], makeProject())).toEqual([
       { path: "docs/PRD.md", anchor: "nope", content: null },
       { path: "docs/MISSING.md", anchor: null, content: null },
     ]);

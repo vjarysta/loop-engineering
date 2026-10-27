@@ -22,89 +22,92 @@ import { worktreePath } from "./worktree.js";
 beforeAll(isolateGitEnv);
 afterAll(cleanupFixtures);
 
-const HIGH_RISK_CONFIG = { risk: { paths: [{ pattern: "src/auth/**", class: "high" }] } };
+const HIGH_RISK_CONFIG = { risk: { high: ["src/auth/**"] } };
 
-async function awaitingMergeProject(): Promise<string> {
-  const { project, taskFile } = makeFixtureProject(HIGH_RISK_CONFIG);
+async function awaitingMergeProject(): Promise<{ project: string; runsDir: string }> {
+  const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
   const claude = scriptedClaude([
     plannerStep(),
     implementerStep({ "feature.txt": "good\n", "src/auth/session.ts": "export {};\n" }),
     approveStep,
   ]);
-  const result = await runTask(project, taskFile, { runClaude: claude.runClaude });
+  const result = await runTask(project, taskFile, { runClaude: claude.runClaude, runsDir });
   expect(result.task.state).toBe("awaiting_merge");
-  return project;
+  return { project, runsDir };
 }
 
 describe("listRuns / latestTask", () => {
   it("returns nothing for a task that never ran", async () => {
-    const { project } = makeFixtureProject();
+    const { runsDir } = makeFixtureProject();
 
-    expect(await listRuns(project, FIXTURE_TASK_ID)).toEqual([]);
-    expect(await latestTask(project, FIXTURE_TASK_ID)).toBeNull();
+    expect(await listRuns(FIXTURE_TASK_ID, runsDir)).toEqual([]);
+    expect(await latestTask(FIXTURE_TASK_ID, runsDir)).toBeNull();
   });
 
   it("lists runs oldest first and exposes the task of the latest one", async () => {
-    const { project, taskFile } = makeFixtureProject();
+    const { project, taskFile, runsDir } = makeFixtureProject();
     const failed = await runTask(project, taskFile, {
       runClaude: scriptedClaude([{ role: "planner", output: "no plan" }]).runClaude,
+      runsDir,
     });
     const succeeded = await runTask(project, taskFile, {
       runClaude: scriptedClaude([plannerStep(), goodImplementerStep, approveStep]).runClaude,
+      runsDir,
     });
 
-    const runs = await listRuns(project, FIXTURE_TASK_ID);
+    const runs = await listRuns(FIXTURE_TASK_ID, runsDir);
 
     expect(runs.map((run) => run.runId)).toEqual([failed.runId, succeeded.runId]);
-    expect(await latestTask(project, FIXTURE_TASK_ID)).toEqual(succeeded.task);
+    expect(await latestTask(FIXTURE_TASK_ID, runsDir)).toEqual(succeeded.task);
   });
 });
 
 describe("mergeTask", () => {
   it("merges an awaiting_merge task into main and records the transition", async () => {
-    const project = await awaitingMergeProject();
+    const { project, runsDir } = await awaitingMergeProject();
     const mainBefore = git(project, "rev-parse", "main");
 
-    const task = await mergeTask(project, FIXTURE_TASK_ID);
+    const task = await mergeTask(FIXTURE_TASK_ID, runsDir);
 
     expect(task.state).toBe("merged");
     expect(git(project, "rev-parse", "main^1")).toBe(mainBefore);
     expect(readFileSync(join(project, "src", "auth", "session.ts"), "utf8")).toBe("export {};\n");
     expect(existsSync(worktreePath(project, FIXTURE_TASK_ID))).toBe(false);
-    const [run] = await listRuns(project, FIXTURE_TASK_ID);
+    const [run] = await listRuns(FIXTURE_TASK_ID, runsDir);
     expect(run?.task.state).toBe("merged");
     expect(run?.transitions.at(-1)).toMatchObject({ from: "awaiting_merge", event: "merge", to: "merged" });
   });
 
   it("refuses a task that is not awaiting merge, without touching git", async () => {
-    const { project, taskFile } = makeFixtureProject();
+    const { project, taskFile, runsDir } = makeFixtureProject();
     await runTask(project, taskFile, {
       runClaude: scriptedClaude([plannerStep(), goodImplementerStep, approveStep]).runClaude,
+      runsDir,
     });
     const mainBefore = git(project, "rev-parse", "main");
 
-    await expect(mergeTask(project, FIXTURE_TASK_ID)).rejects.toThrow(InvalidTransitionError);
+    await expect(mergeTask(FIXTURE_TASK_ID, runsDir)).rejects.toThrow(InvalidTransitionError);
     expect(git(project, "rev-parse", "main")).toBe(mainBefore);
   });
 
   it("reports conflicts and leaves the task awaiting merge", async () => {
-    const project = await awaitingMergeProject();
+    const { project, runsDir } = await awaitingMergeProject();
     writeFile(project, "feature.txt", "changed on main\n");
     git(project, "commit", "-q", "-am", "conflicting change");
     const mainBefore = git(project, "rev-parse", "main");
 
-    const error = await mergeTask(project, FIXTURE_TASK_ID).catch((e: unknown) => e);
+    const error = await mergeTask(FIXTURE_TASK_ID, runsDir).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(MergeConflictError);
     expect(error).toMatchObject({ files: ["feature.txt"] });
     expect(git(project, "rev-parse", "main")).toBe(mainBefore);
-    expect((await latestTask(project, FIXTURE_TASK_ID))?.state).toBe("awaiting_merge");
+    expect((await latestTask(FIXTURE_TASK_ID, runsDir))?.state).toBe("awaiting_merge");
     expect(existsSync(worktreePath(project, FIXTURE_TASK_ID))).toBe(true);
   });
 
   it("rejects an unknown task", async () => {
-    const { project } = makeFixtureProject();
+    const { runsDir } = makeFixtureProject();
 
-    await expect(mergeTask(project, FIXTURE_TASK_ID)).rejects.toThrow(TaskNotFoundError);
+    await expect(mergeTask(FIXTURE_TASK_ID, runsDir)).rejects.toThrow(TaskNotFoundError);
   });
 });

@@ -2,15 +2,14 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
-  type AgentRole,
+  AGENT_ROLES,
   buildProjectContext,
   CONFIG_PATH,
+  DEFAULT_RUNS_DIR,
   InvalidTransitionError,
   listRuns,
   loadProjectConfig,
   loadTaskFile,
-  MAX_CHECK_ITERATIONS,
-  MAX_REVIEW_ITERATIONS,
   mergeTask,
   type RunLog,
   runTask,
@@ -19,12 +18,11 @@ import {
   worktree,
 } from "@loop-engineering/core";
 import { formatCost, formatDuration, formatTable } from "./format.js";
-import { type Env, lookupTask, registerTask } from "./registry.js";
 
 export interface CliIo {
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
-  readonly env: Env;
+  readonly env: Readonly<Record<string, string | undefined>>;
 }
 
 export interface CliDeps {
@@ -32,16 +30,15 @@ export interface CliDeps {
 }
 
 const USAGE = `Usage:
-  loop validate <projectPath>             Validate .loop/config.json and print each role's PROJECT_CONTEXT
-  loop run <projectPath> <taskFile>       Run a task through planner, implementer, checks and reviewer
-  loop status <taskId> [--project <p>]    Show the state of a task
-  loop merge <taskId> [--project <p>]     Merge a task awaiting a human merge into main
-  loop runs <taskId> [--project <p>]      Show tokens, cost and duration per step of each run
+  loop validate <projectPath>         Validate .loop/config.json and print each role's PROJECT_CONTEXT
+  loop run <projectPath> <taskFile>   Run a task through planner, implementer, checks and reviewer
+  loop status <taskId>                Show the state of a task
+  loop merge <taskId>                 Merge a task awaiting a human merge into main
+  loop runs <taskId>                  Show tokens, cost and duration per step of each run
 
-Commands taking a task id find its project from \`loop run\`, or from --project.
+Specs and run logs live in $LOOP_RUNS_DIR/<taskId>/ (loop-engineering's runs/ by default),
+never in the target project.
 `;
-
-const ROLES: readonly AgentRole[] = ["planner", "implementer", "reviewer"];
 
 class UsageError extends Error {}
 
@@ -51,7 +48,7 @@ export async function main(argv: readonly string[], io: CliIo, deps: CliDeps = {
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { project: { type: "string" }, help: { type: "boolean", short: "h" } },
+      options: { help: { type: "boolean", short: "h" } },
       allowPositionals: true,
     });
   } catch (error) {
@@ -63,24 +60,28 @@ export async function main(argv: readonly string[], io: CliIo, deps: CliDeps = {
   }
 
   const [command, ...args] = parsed.positionals;
-  const project = parsed.values.project;
+  const runsDir = resolve(io.env["LOOP_RUNS_DIR"] ?? DEFAULT_RUNS_DIR);
   try {
     switch (command) {
       case "validate":
         return await validate(io, single(args, "validate"));
       case "run":
-        return await run(io, deps, pair(args, "run"));
+        return await run(io, deps, runsDir, pair(args, "run"));
       case "status":
-        return await status(io, single(args, "status"), project);
+        return await status(io, runsDir, single(args, "status"));
       case "merge":
-        return await merge(io, single(args, "merge"), project);
+        return await merge(io, runsDir, single(args, "merge"));
       case "runs":
-        return await runs(io, single(args, "runs"), project);
+        return await runs(io, runsDir, single(args, "runs"));
       default:
         return usage(io, command === undefined ? "missing command" : `unknown command: ${command}`);
     }
   } catch (error) {
     if (error instanceof UsageError) return usage(io, error.message);
+    if (error instanceof TaskNotFoundError) {
+      io.stderr(`Error: no run found for task ${error.taskId} in ${runsDir}.\n`);
+      return 1;
+    }
     io.stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
@@ -89,20 +90,41 @@ export async function main(argv: readonly string[], io: CliIo, deps: CliDeps = {
 async function validate(io: CliIo, projectArg: string): Promise<number> {
   const projectPath = resolve(projectArg);
   const config = await loadProjectConfig(projectPath);
-  io.stdout(`${join(projectPath, CONFIG_PATH)} is valid.\nCheck command: ${config.check}\n`);
-  for (const role of ROLES) {
+  const { models, budgets, risk } = config;
+  io.stdout(
+    [
+      `${join(projectPath, CONFIG_PATH)} is valid.`,
+      `Check command: ${config.check}`,
+      `Main branch:   ${config.mainBranch}`,
+      `Models:        planner ${models.planner}, implementer ${models.implementer}, reviewer ${models.reviewer}` +
+        (models.pm === undefined ? "" : `, pm ${models.pm} (no pm agent yet)`),
+      `Budgets:       ${String(budgets.checkIterations)} check, ${String(budgets.reviewIterations)} review iterations`,
+      `Risk:          high ${String(risk.high.length)}, medium ${String(risk.medium.length)}, low ${String(risk.low.length)} globs; ` +
+        `low risk up to ${String(risk.maxLowRiskDiffLines)} changed lines`,
+      `Signals:       ${config.signals?.map(({ id }) => id).join(", ") ?? "none"} (not used yet)`,
+      "",
+    ].join("\n"),
+  );
+  for (const role of AGENT_ROLES) {
     io.stdout(`\n=== ${role} ===\n${buildProjectContext(config, role)}\n`);
   }
   return 0;
 }
 
-async function run(io: CliIo, deps: CliDeps, [projectArg, taskFile]: readonly [string, string]): Promise<number> {
+async function run(
+  io: CliIo,
+  deps: CliDeps,
+  runsDir: string,
+  [projectArg, taskFile]: readonly [string, string],
+): Promise<number> {
   const projectPath = resolve(projectArg);
   const { id } = await loadTaskFile(taskFile);
-  await registerTask(io.env, id, projectPath);
   io.stdout(`Running task ${id} in ${projectPath}…\n`);
 
-  const result = await runTask(projectPath, taskFile, deps.runClaude === undefined ? {} : { runClaude: deps.runClaude });
+  const result = await runTask(projectPath, taskFile, {
+    runsDir,
+    ...(deps.runClaude !== undefined && { runClaude: deps.runClaude }),
+  });
   const { task } = result;
   io.stdout(`Task ${task.id}: ${task.state}${result.error === null ? "" : " (run failed)"}\nRun log: ${result.logPath}\n`);
   if (result.error !== null) {
@@ -123,13 +145,12 @@ async function run(io: CliIo, deps: CliDeps, [projectArg, taskFile]: readonly [s
   }
 }
 
-async function status(io: CliIo, taskId: string, projectOption: string | undefined): Promise<number> {
-  const projectPath = await resolveProject(io, taskId, projectOption);
-  const all = await listRuns(projectPath, taskId);
+async function status(io: CliIo, runsDir: string, taskId: string): Promise<number> {
+  const all = await listRuns(taskId, runsDir);
   const last = all.at(-1);
   if (last === undefined) throw new TaskNotFoundError(taskId);
 
-  const { task } = last;
+  const { task, projectPath } = last;
   const worktreeDir = worktree.worktreePath(projectPath, taskId);
   const rows: [string, string][] = [
     ["Task", `${task.id}: ${task.title}`],
@@ -138,10 +159,11 @@ async function status(io: CliIo, taskId: string, projectOption: string | undefin
     ["Risk class", task.riskClass],
     [
       "Iterations",
-      `checks ${String(task.checkIterations)}/${String(MAX_CHECK_ITERATIONS)}, ` +
-        `review ${String(task.reviewIterations)}/${String(MAX_REVIEW_ITERATIONS)}`,
+      `checks ${String(task.checkIterations)}/${String(last.config.budgets.checkIterations)}, ` +
+        `review ${String(task.reviewIterations)}/${String(last.config.budgets.reviewIterations)}`,
     ],
     ["Spec", task.specPath === "" ? "-" : task.specPath],
+    ["Run logs", join(runsDir, taskId)],
     ["Worktree", existsSync(worktreeDir) ? worktreeDir : "-"],
     ["Last run", `${last.runId} (${last.status}, started ${last.startedAt})`],
     ["Runs", String(all.length)],
@@ -151,10 +173,9 @@ async function status(io: CliIo, taskId: string, projectOption: string | undefin
   return 0;
 }
 
-async function merge(io: CliIo, taskId: string, projectOption: string | undefined): Promise<number> {
-  const projectPath = await resolveProject(io, taskId, projectOption);
+async function merge(io: CliIo, runsDir: string, taskId: string): Promise<number> {
   try {
-    await mergeTask(projectPath, taskId);
+    await mergeTask(taskId, runsDir);
   } catch (error) {
     if (error instanceof InvalidTransitionError) {
       io.stderr(`Error: task ${taskId} is ${error.state}, not awaiting_merge.\n`);
@@ -166,9 +187,8 @@ async function merge(io: CliIo, taskId: string, projectOption: string | undefine
   return 0;
 }
 
-async function runs(io: CliIo, taskId: string, projectOption: string | undefined): Promise<number> {
-  const projectPath = await resolveProject(io, taskId, projectOption);
-  const all = await listRuns(projectPath, taskId);
+async function runs(io: CliIo, runsDir: string, taskId: string): Promise<number> {
+  const all = await listRuns(taskId, runsDir);
   if (all.length === 0) throw new TaskNotFoundError(taskId);
 
   io.stdout(`${all.map(formatRun).join("\n\n")}\n`);
@@ -216,15 +236,6 @@ function formatRun(run: RunLog): string {
     { rightAlign: [4, 5, 6, 7, 8, 9], footer },
   );
   return [header, ...(run.error === null ? [] : [`Error: ${run.error}`]), table].join("\n");
-}
-
-async function resolveProject(io: CliIo, taskId: string, projectOption: string | undefined): Promise<string> {
-  if (projectOption !== undefined) return resolve(projectOption);
-  const registered = await lookupTask(io.env, taskId);
-  if (registered === null) {
-    throw new Error(`unknown task ${taskId}: run it with \`loop run\` first, or pass --project <projectPath>.`);
-  }
-  return registered;
 }
 
 function single(args: readonly string[], command: string): string {

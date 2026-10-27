@@ -21,11 +21,11 @@ import { main } from "./cli.js";
 
 beforeAll(isolateGitEnv);
 
-const loopHomes: string[] = [];
+const tmpRunsDirs: string[] = [];
 
 afterAll(() => {
   cleanupFixtures();
-  for (const dir of loopHomes) rmSync(dir, { recursive: true, force: true });
+  for (const dir of tmpRunsDirs) rmSync(dir, { recursive: true, force: true });
 });
 
 interface Outcome {
@@ -34,18 +34,17 @@ interface Outcome {
   readonly stderr: string;
 }
 
-/** A CLI with its own LOOP_HOME, so the task registry never leaks between tests. */
-function makeCli(): { readonly loopHome: string; readonly run: (argv: string[], script?: ScriptStep[]) => Promise<Outcome> } {
-  const loopHome = mkdtempSync(join(tmpdir(), "loop-home-"));
-  loopHomes.push(loopHome);
+/** A CLI whose specs and run logs go to `runsDir` (a fresh temporary one by default), never to the repo. */
+function makeCli(runsDir?: string): { readonly run: (argv: string[], script?: ScriptStep[]) => Promise<Outcome> } {
+  const dir = runsDir ?? mkdtempSync(join(tmpdir(), "loop-runs-"));
+  if (runsDir === undefined) tmpRunsDirs.push(dir);
   return {
-    loopHome,
     run: async (argv, script = []) => {
       let stdout = "";
       let stderr = "";
       const code = await main(
         argv,
-        { stdout: (text) => (stdout += text), stderr: (text) => (stderr += text), env: { LOOP_HOME: loopHome } },
+        { stdout: (text) => (stdout += text), stderr: (text) => (stderr += text), env: { LOOP_RUNS_DIR: dir } },
         { runClaude: scriptedClaude(script).runClaude },
       );
       return { code, stdout, stderr };
@@ -59,16 +58,18 @@ const HIGH_RISK_PATH = [
   implementerStep({ "feature.txt": "good\n", "src/auth/session.ts": "export {};\n" }),
   approveStep,
 ];
-const HIGH_RISK_CONFIG = { risk: { paths: [{ pattern: "src/auth/**", class: "high" }] } };
+const HIGH_RISK_CONFIG = { risk: { high: ["src/auth/**"] } };
 
 describe("loop validate", () => {
   it("prints the PROJECT_CONTEXT of every role for a valid config", async () => {
-    const { project } = makeFixtureProject({ agents: { reviewer: { extraInstructions: "Be strict." } } });
+    const { project } = makeFixtureProject({ agents: { extraInstructions: { reviewer: "Be strict." } } });
 
     const { code, stdout } = await makeCli().run(["validate", project]);
 
     expect(code).toBe(0);
     expect(stdout).toContain(`${join(project, ".loop", "config.json")} is valid`);
+    expect(stdout).toMatch(/Models:\s+planner opus, implementer sonnet, reviewer haiku/);
+    expect(stdout).toMatch(/Budgets:\s+3 check, 2 review iterations/);
     expect(stdout).toContain("=== planner ===\n<PROJECT_CONTEXT>");
     expect(stdout).toContain("=== implementer ===\n<PROJECT_CONTEXT>");
     expect(stdout).toContain("=== reviewer ===\n<PROJECT_CONTEXT>");
@@ -76,32 +77,31 @@ describe("loop validate", () => {
   });
 
   it("fails on an invalid config, naming the offending field", async () => {
-    const { project } = makeFixtureProject({ protectedPaths: [42] });
+    const { project } = makeFixtureProject({ agents: { protectedPaths: [42] } });
 
     const { code, stderr } = await makeCli().run(["validate", project]);
 
     expect(code).toBe(1);
-    expect(stderr).toContain("protectedPaths");
+    expect(stderr).toContain("agents.protectedPaths");
   });
 });
 
 describe("loop run", () => {
-  it("runs the task, registers it and exits 0 once merged", async () => {
-    const { project, taskFile } = makeFixtureProject();
-    const cli = makeCli();
+  it("runs the task with its logs in LOOP_RUNS_DIR and exits 0 once merged", async () => {
+    const { project, taskFile, runsDir } = makeFixtureProject();
+    const cli = makeCli(runsDir);
 
     const { code, stdout } = await cli.run(["run", project, taskFile], HAPPY_PATH);
 
     expect(code).toBe(0);
     expect(stdout).toContain(`Task ${FIXTURE_TASK_ID}: merged`);
-    expect(stdout).toMatch(new RegExp(`Run log: ${join(project, ".loop", "runs", FIXTURE_TASK_ID)}/.+\\.json`));
-    expect(JSON.parse(readFileSync(join(cli.loopHome, "tasks.json"), "utf8"))).toEqual({ [FIXTURE_TASK_ID]: project });
+    expect(stdout).toMatch(new RegExp(`Run log: ${join(runsDir, FIXTURE_TASK_ID)}/.+\\.json`));
   });
 
   it("exits 0 and points to loop merge when the task awaits a human merge", async () => {
-    const { project, taskFile } = makeFixtureProject(HIGH_RISK_CONFIG);
+    const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
 
-    const { code, stdout } = await makeCli().run(["run", project, taskFile], HIGH_RISK_PATH);
+    const { code, stdout } = await makeCli(runsDir).run(["run", project, taskFile], HIGH_RISK_PATH);
 
     expect(code).toBe(0);
     expect(stdout).toContain(`Task ${FIXTURE_TASK_ID}: awaiting_merge`);
@@ -119,9 +119,9 @@ describe("loop run", () => {
   });
 
   it("exits 1 and prints the error when the run fails", async () => {
-    const { project, taskFile } = makeFixtureProject();
+    const { project, taskFile, runsDir } = makeFixtureProject();
 
-    const { code, stderr } = await makeCli().run(["run", project, taskFile], [{ role: "planner", output: "nope" }]);
+    const { code, stderr } = await makeCli(runsDir).run(["run", project, taskFile], [{ role: "planner", output: "nope" }]);
 
     expect(code).toBe(1);
     expect(stderr).toContain("Invalid planner output");
@@ -129,9 +129,9 @@ describe("loop run", () => {
 });
 
 describe("loop status", () => {
-  it("shows the state of a registered task", async () => {
-    const { project, taskFile } = makeFixtureProject(HIGH_RISK_CONFIG);
-    const cli = makeCli();
+  it("shows the state of a task, finding its project from the run logs", async () => {
+    const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
+    const cli = makeCli(runsDir);
     await cli.run(["run", project, taskFile], HIGH_RISK_PATH);
 
     const { code, stdout } = await cli.run(["status", FIXTURE_TASK_ID]);
@@ -143,28 +143,20 @@ describe("loop status", () => {
     expect(stdout).toMatch(new RegExp(`Project:\\s+${project}`));
   });
 
-  it("finds the task with --project when it is not registered", async () => {
-    const { project, taskFile } = makeFixtureProject();
-    await makeCli().run(["run", project, taskFile], HAPPY_PATH);
+  it("fails for an unknown task, naming the runs directory searched", async () => {
+    const { runsDir } = makeFixtureProject();
 
-    const { code, stdout } = await makeCli().run(["status", FIXTURE_TASK_ID, "--project", project]);
-
-    expect(code).toBe(0);
-    expect(stdout).toMatch(/State:\s+merged/);
-  });
-
-  it("fails with a hint for an unknown task", async () => {
-    const { code, stderr } = await makeCli().run(["status", "nope"]);
+    const { code, stderr } = await makeCli(runsDir).run(["status", "nope"]);
 
     expect(code).toBe(1);
-    expect(stderr).toContain("--project");
+    expect(stderr).toContain(`no run found for task nope in ${runsDir}`);
   });
 });
 
 describe("loop merge", () => {
   it("merges an awaiting_merge task", async () => {
-    const { project, taskFile } = makeFixtureProject(HIGH_RISK_CONFIG);
-    const cli = makeCli();
+    const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
+    const cli = makeCli(runsDir);
     await cli.run(["run", project, taskFile], HIGH_RISK_PATH);
 
     const { code, stdout } = await cli.run(["merge", FIXTURE_TASK_ID]);
@@ -176,8 +168,8 @@ describe("loop merge", () => {
   });
 
   it("refuses a task that is not awaiting merge", async () => {
-    const { project, taskFile } = makeFixtureProject();
-    const cli = makeCli();
+    const { project, taskFile, runsDir } = makeFixtureProject();
+    const cli = makeCli(runsDir);
     await cli.run(["run", project, taskFile], HAPPY_PATH);
 
     const { code, stderr } = await cli.run(["merge", FIXTURE_TASK_ID]);
@@ -187,8 +179,8 @@ describe("loop merge", () => {
   });
 
   it("reports conflicting files", async () => {
-    const { project, taskFile } = makeFixtureProject(HIGH_RISK_CONFIG);
-    const cli = makeCli();
+    const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
+    const cli = makeCli(runsDir);
     await cli.run(["run", project, taskFile], HIGH_RISK_PATH);
     writeFile(project, "feature.txt", "changed on main\n");
     git(project, "commit", "-q", "-am", "conflicting change");
@@ -202,8 +194,8 @@ describe("loop merge", () => {
 
 describe("loop runs", () => {
   it("prints tokens, cost and duration per step with totals", async () => {
-    const { project, taskFile } = makeFixtureProject();
-    const cli = makeCli();
+    const { project, taskFile, runsDir } = makeFixtureProject();
+    const cli = makeCli(runsDir);
     await cli.run(["run", project, taskFile], HAPPY_PATH);
 
     const { code, stdout } = await cli.run(["runs", FIXTURE_TASK_ID]);
@@ -257,9 +249,9 @@ describe("loop runs", () => {
   });
 
   it("fails for a task without runs", async () => {
-    const { project } = makeFixtureProject();
+    const { runsDir } = makeFixtureProject();
 
-    const { code, stderr } = await makeCli().run(["runs", FIXTURE_TASK_ID, "--project", project]);
+    const { code, stderr } = await makeCli(runsDir).run(["runs", FIXTURE_TASK_ID]);
 
     expect(code).toBe(1);
     expect(stderr).toContain(FIXTURE_TASK_ID);

@@ -5,7 +5,7 @@ Review one change. Edit nothing.
 ## Inputs
 
 - `PROJECT_CONTEXT`: sources of truth, protected paths, project instructions for the reviewer.
-- The spec.
+- The spec path. Read the spec there; it lies outside the repository.
 - The diff against `main`.
 - The check output.
 - The cited sections of the sources of truth.

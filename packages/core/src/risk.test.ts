@@ -60,41 +60,34 @@ describe("countChangedLines", () => {
 });
 
 describe("computeRiskClass", () => {
-  it("is low without rules", () => {
-    expect(computeRiskClass({ paths: [] }, ["src/a.ts"], 10_000)).toBe("low");
-  });
-
-  it("takes the highest class among the matching path rules", () => {
-    const rules: RiskRules = {
-      paths: [
-        { pattern: "src/**", class: "medium" },
-        { pattern: "src/auth/**", class: "high" },
-        { pattern: "docs/**", class: "low" },
-      ],
-    };
-
-    expect(computeRiskClass(rules, ["docs/a.md"], 0)).toBe("low");
-    expect(computeRiskClass(rules, ["docs/a.md", "src/a.ts"], 0)).toBe("medium");
-    expect(computeRiskClass(rules, ["src/a.ts", "src/auth/b.ts"], 0)).toBe("high");
-  });
+  const rules: RiskRules = {
+    high: ["src/engine/save/**", "docs/PRD.md"],
+    medium: ["src/engine/**"],
+    low: ["src/ui/**", "docs/**"],
+    maxLowRiskDiffLines: 400,
+  };
 
   it.each([
-    [4, "low"],
-    [5, "medium"],
-    [9, "medium"],
-    [10, "high"],
-  ] as const)("a diff of %i changed lines with thresholds 5/10 is %s", (lines, expected) => {
-    expect(computeRiskClass({ paths: [], diffLines: { medium: 5, high: 10 } }, [], lines)).toBe(expected);
+    [["src/ui/button.ts"], "low"],
+    [["src/ui/button.ts", "docs/guide.md"], "low"],
+    [["src/engine/tick.ts"], "medium"],
+    [["src/engine/save/slot.ts"], "high"],
+    [["docs/PRD.md"], "high"],
+    [["src/ui/button.ts", "src/engine/save/slot.ts"], "high"],
+    [["README.md"], "medium"],
+    [["src/ui/button.ts", "README.md"], "medium"],
+    [[], "low"],
+  ] as const)("%j → %s", (files, expected) => {
+    expect(computeRiskClass(rules, files, 10)).toBe(expected);
   });
 
-  it("applies a lone high threshold", () => {
-    expect(computeRiskClass({ paths: [], diffLines: { high: 10 } }, [], 9)).toBe("low");
-    expect(computeRiskClass({ paths: [], diffLines: { high: 10 } }, [], 10)).toBe("high");
+  it("raises a low-risk change to medium above maxLowRiskDiffLines", () => {
+    expect(computeRiskClass(rules, ["src/ui/button.ts"], 400)).toBe("low");
+    expect(computeRiskClass(rules, ["src/ui/button.ts"], 401)).toBe("medium");
   });
 
-  it("combines path rules and diff size", () => {
-    const rules: RiskRules = { paths: [{ pattern: "src/**", class: "medium" }], diffLines: { high: 10 } };
-
-    expect(computeRiskClass(rules, ["src/a.ts"], 10)).toBe("high");
+  it("never lowers a high-risk change because of its size", () => {
+    expect(computeRiskClass(rules, ["docs/PRD.md"], 1)).toBe("high");
+    expect(computeRiskClass(rules, ["docs/PRD.md"], 10_000)).toBe("high");
   });
 });

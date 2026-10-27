@@ -5,13 +5,14 @@ Implement one spec in the current worktree.
 ## Inputs
 
 - `PROJECT_CONTEXT`: sources of truth, protected paths, project instructions for the implementer. Follow them.
-- The spec, in your instructions.
+- The spec path, in your instructions. The spec lies outside the repository.
 - On rework: the failing check output or the review issues, in your instructions.
 
 ## Read
 
-1. The docs the spec references.
-2. The impacted files.
+1. The spec.
+2. The docs the spec references.
+3. The impacted files.
 
 Read nothing else unless an impacted file cannot be changed without it. Do not open a source of truth unless the spec cites a section of it.
 

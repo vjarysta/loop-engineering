@@ -111,6 +111,16 @@ describe("runClaude — invocation", () => {
     expect(args).toEqual(["-p", "--output-format", "json", "--model", "haiku", "--allowedTools", "Read", "Bash(git *)"]);
   });
 
+  it("grants extra directories before the allowed tools, both variadic lists ending at the next flag", async () => {
+    const args = (await echo({ addDirs: ["/runs/task-1", "/shared"], allowedTools: ["Read"] })).args;
+
+    expect(args).toEqual(["-p", "--output-format", "json", "--add-dir", "/runs/task-1", "/shared", "--allowedTools", "Read"]);
+  });
+
+  it("omits --add-dir for an empty list", async () => {
+    expect((await echo({ addDirs: [] })).args).toEqual(["-p", "--output-format", "json"]);
+  });
+
   it("omits --allowedTools for an empty list", async () => {
     expect((await echo({ allowedTools: [] })).args).toEqual(["-p", "--output-format", "json"]);
   });

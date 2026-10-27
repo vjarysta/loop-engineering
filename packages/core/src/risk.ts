@@ -21,16 +21,17 @@ export function countChangedLines(diff: string): number {
     .length;
 }
 
+/**
+ * Each changed file takes the class of the highest list it matches (high, then medium, then low); a file
+ * matching none counts as medium. A low-risk change larger than maxLowRiskDiffLines counts as medium.
+ */
 export function computeRiskClass(rules: RiskRules, changedFiles: readonly string[], changedLines: number): RiskClass {
-  const fromPaths = rules.paths
-    .filter((rule) => changedFiles.some((file) => posix.matchesGlob(file, rule.pattern)))
-    .map((rule) => rule.class);
-  const { medium, high } = rules.diffLines ?? {};
-  const fromSize: RiskClass =
-    high !== undefined && changedLines >= high
-      ? "high"
-      : medium !== undefined && changedLines >= medium
-        ? "medium"
-        : "low";
-  return maxRiskClass(...fromPaths, fromSize);
+  const fromFiles = changedFiles.map((file): RiskClass => {
+    if (matchesAny(file, rules.high)) return "high";
+    if (matchesAny(file, rules.medium)) return "medium";
+    if (matchesAny(file, rules.low)) return "low";
+    return "medium";
+  });
+  const fromSize: RiskClass = changedLines > rules.maxLowRiskDiffLines ? "medium" : "low";
+  return maxRiskClass(...fromFiles, fromSize);
 }

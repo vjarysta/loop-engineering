@@ -11,6 +11,8 @@ export interface RunClaudeOptions {
   readonly appendSystemPrompt?: string;
   readonly model?: string;
   readonly allowedTools?: readonly string[];
+  /** Directories outside cwd the tools may access (--add-dir). */
+  readonly addDirs?: readonly string[];
   /** Delay between SIGTERM and SIGKILL on timeout. */
   readonly killGraceMs?: number;
   /** Path to the claude binary. */
@@ -102,7 +104,11 @@ async function buildArgs(options: RunClaudeOptions): Promise<string[]> {
   if (systemPrompt.length > 0) {
     args.push("--append-system-prompt", systemPrompt.join("\n\n"));
   }
-  // --allowedTools is variadic: it must come last so it cannot swallow other arguments.
+  // --add-dir and --allowedTools are variadic: each list ends at the next flag, and the prompt goes
+  // through stdin so nothing positional can be swallowed.
+  if (options.addDirs !== undefined && options.addDirs.length > 0) {
+    args.push("--add-dir", ...options.addDirs);
+  }
   if (options.allowedTools !== undefined && options.allowedTools.length > 0) {
     args.push("--allowedTools", ...options.allowedTools);
   }

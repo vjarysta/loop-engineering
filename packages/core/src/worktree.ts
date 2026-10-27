@@ -4,7 +4,6 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const MAIN_BRANCH = "main";
 // Letters, digits, "-" and "_": safe in a branch name and a path segment, never an option.
 export const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
@@ -46,35 +45,35 @@ export function worktreePath(projectPath: string, taskId: string): string {
   return join(dirname(project), ".loop-worktrees", basename(project), taskId);
 }
 
-export async function create(projectPath: string, taskId: string): Promise<string> {
+export async function create(projectPath: string, taskId: string, mainBranch: string): Promise<string> {
   assertTaskId(taskId);
   const path = worktreePath(projectPath, taskId);
-  await git(projectPath, ["worktree", "add", "-q", "-b", branchName(taskId), path, MAIN_BRANCH]);
+  await git(projectPath, ["worktree", "add", "-q", "-b", branchName(taskId), path, mainBranch]);
   return path;
 }
 
-export async function diff(projectPath: string, taskId: string): Promise<string> {
+export async function diff(projectPath: string, taskId: string, mainBranch: string): Promise<string> {
   assertTaskId(taskId);
-  return git(projectPath, ["diff", "--no-color", "--no-ext-diff", `${MAIN_BRANCH}...${branchName(taskId)}`]);
+  return git(projectPath, ["diff", "--no-color", "--no-ext-diff", `${mainBranch}...${branchName(taskId)}`]);
 }
 
-export async function changedFiles(projectPath: string, taskId: string): Promise<string[]> {
+export async function changedFiles(projectPath: string, taskId: string, mainBranch: string): Promise<string[]> {
   assertTaskId(taskId);
   const output = await git(projectPath, [
     "diff",
     "--name-only",
     "--no-renames",
     "-z",
-    `${MAIN_BRANCH}...${branchName(taskId)}`,
+    `${mainBranch}...${branchName(taskId)}`,
   ]);
   return splitNul(output);
 }
 
-export async function merge(projectPath: string, taskId: string): Promise<MergeResult> {
+export async function merge(projectPath: string, taskId: string, mainBranch: string): Promise<MergeResult> {
   assertTaskId(taskId);
   const head = await git(projectPath, ["symbolic-ref", "--short", "-q", "HEAD"]).catch(() => "");
-  if (head.trim() !== MAIN_BRANCH) {
-    throw new MergePreconditionError(`Project must be on ${MAIN_BRANCH} to merge (currently: ${head.trim() || "detached"})`);
+  if (head.trim() !== mainBranch) {
+    throw new MergePreconditionError(`Project must be on ${mainBranch} to merge (currently: ${head.trim() || "detached"})`);
   }
   if ((await git(projectPath, ["status", "--porcelain", "--untracked-files=no"])) !== "") {
     throw new MergePreconditionError("Project has uncommitted changes");

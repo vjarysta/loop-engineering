@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, normalize } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parsePlannerOutput, parseReviewerOutput, type ReviewVerdict } from "./agent-output.js";
 import { runProcess } from "./process.js";
@@ -8,7 +8,7 @@ import { type AgentRole, buildProjectContext, loadProjectConfig, type ProjectCon
 import { computeRiskClass, countChangedLines, matchesAny, maxRiskClass } from "./risk.js";
 import { type ClaudeUsage, runClaude, type RunClaudeOptions, type RunClaudeResult } from "./run-claude.js";
 import { extractCitedSources, formatCitedSources } from "./sources.js";
-import { runLogPath } from "./task-runs.js";
+import { DEFAULT_RUNS_DIR, runLogPath, specFilePath } from "./task-runs.js";
 import { loadTaskFile, type TaskFile } from "./task-file.js";
 import { transition } from "./transition.js";
 import type { Task, TaskEvent, TaskState } from "./types.js";
@@ -16,12 +16,13 @@ import * as worktree from "./worktree.js";
 
 const DEFAULT_AGENTS_DIR = fileURLToPath(new URL("../../../agents/", import.meta.url));
 
-const DEFAULT_AGENT_SETTINGS: Readonly<Record<AgentRole, { allowedTools: readonly string[]; timeoutMs: number }>> = {
+// Not part of .loop/config.json: tools and timeouts per role, and the check timeout, are fixed here.
+const AGENT_SETTINGS: Readonly<Record<AgentRole, { allowedTools: readonly string[]; timeoutMs: number }>> = {
   planner: { allowedTools: ["Read", "Glob", "Grep", "Write"], timeoutMs: 15 * 60_000 },
   implementer: { allowedTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], timeoutMs: 60 * 60_000 },
   reviewer: { allowedTools: ["Read", "Glob", "Grep"], timeoutMs: 15 * 60_000 },
 };
-const DEFAULT_CHECK_TIMEOUT_MS = 15 * 60_000;
+const CHECK_TIMEOUT_MS = 15 * 60_000;
 /** The agent must never touch its own configuration, specs or run logs. */
 const ALWAYS_PROTECTED = [".loop/**"];
 /** Tail of the check output sent back to the implementer. */
@@ -32,6 +33,8 @@ export interface RunTaskOptions {
   readonly runClaude?: (options: RunClaudeOptions, role: AgentRole) => Promise<RunClaudeResult>;
   /** Directory holding planner.md, implementer.md and reviewer.md. */
   readonly agentsDir?: string;
+  /** Where specs and run logs go (`<runsDir>/<taskId>/`); loop-engineering's runs/ by default. */
+  readonly runsDir?: string;
 }
 
 export interface RunStep {
@@ -60,6 +63,8 @@ export interface RunLog {
   readonly taskId: string;
   readonly taskFile: string;
   readonly projectPath: string;
+  /** The validated .loop/config.json the run used; `loop merge` and `loop status` read it back. */
+  readonly config: ProjectConfig;
   readonly startedAt: string;
   finishedAt: string | null;
   status: "running" | "completed" | "error";
@@ -90,8 +95,9 @@ export async function runTask(projectPath: string, taskFile: string, options: Ru
   const config = await loadProjectConfig(projectPath);
   const taskDef = await loadTaskFile(taskFile);
   const runId = randomUUID();
-  const logPath = runLogPath(projectPath, taskDef.id, runId);
-  const run = new TaskRun(projectPath, config, taskDef, runId, logPath, taskFile, options);
+  const runsDir = resolve(options.runsDir ?? DEFAULT_RUNS_DIR);
+  const logPath = runLogPath(runsDir, taskDef.id, runId);
+  const run = new TaskRun(projectPath, config, taskDef, runId, logPath, specFilePath(runsDir, taskDef.id), taskFile, options);
   return run.execute();
 }
 
@@ -107,6 +113,8 @@ class TaskRun {
     private readonly taskDef: TaskFile,
     private readonly runId: string,
     private readonly logPath: string,
+    /** Absolute; outside the target repository so the run never writes into it. */
+    private readonly specPath: string,
     taskFile: string,
     options: RunTaskOptions,
   ) {
@@ -128,6 +136,7 @@ class TaskRun {
       taskId: taskDef.id,
       taskFile,
       projectPath,
+      config,
       startedAt: new Date().toISOString(),
       finishedAt: null,
       status: "running",
@@ -150,12 +159,12 @@ class TaskRun {
 
   private async pipeline(): Promise<void> {
     const spec = await this.plan();
-    const worktreeDir = await worktree.create(this.projectPath, this.task.id);
+    const worktreeDir = await worktree.create(this.projectPath, this.task.id, this.config.mainBranch);
     await this.apply("start");
 
     let feedback: string | null = null;
     for (let iteration = 1; ; iteration++) {
-      await this.implement(worktreeDir, spec, feedback, iteration);
+      await this.implement(worktreeDir, feedback, iteration);
       await worktree.commitAll(this.projectPath, this.task.id, `${this.task.id}: implementer iteration ${String(iteration)}`);
 
       await this.apply("run_checks");
@@ -168,7 +177,7 @@ class TaskRun {
       }
       await this.apply("checks_passed");
 
-      const diff = await worktree.diff(this.projectPath, this.task.id);
+      const diff = await worktree.diff(this.projectPath, this.task.id, this.config.mainBranch);
       const verdict = await this.review(worktreeDir, spec, diff, check.output, iteration);
       if (verdict.verdict === "changes") {
         await this.apply("request_changes");
@@ -183,43 +192,42 @@ class TaskRun {
   }
 
   private async plan(): Promise<string> {
-    const expectedSpecPath = join(".loop", "specs", `${this.task.id}.md`);
+    await mkdir(dirname(this.specPath), { recursive: true });
     const result = await this.agent("planner", 1, {
       cwd: this.projectPath,
       prompt: [
         `Task id: ${this.taskDef.id}`,
         `Title: ${this.taskDef.title}`,
+        `Spec path: ${this.specPath}`,
         "",
         this.taskDef.description,
-        "",
-        `Write the spec to ${expectedSpecPath}.`,
       ].join("\n"),
       appendSystemPrompt: buildProjectContext(this.config, "planner"),
     });
 
     const plan = parsePlannerOutput(result.resultText);
-    if (normalize(plan.specPath) !== expectedSpecPath) {
-      throw new RunTaskError(`Planner wrote ${plan.specPath} instead of ${expectedSpecPath}`);
+    if (resolve(plan.specPath) !== this.specPath) {
+      throw new RunTaskError(`Planner wrote ${plan.specPath} instead of ${this.specPath}`);
     }
-    const spec = await readFile(join(this.projectPath, expectedSpecPath), "utf8").catch((cause: unknown) => {
-      throw new RunTaskError(`Planner did not write ${expectedSpecPath}`, { cause });
+    const spec = await readFile(this.specPath, "utf8").catch((cause: unknown) => {
+      throw new RunTaskError(`Planner did not write ${this.specPath}`, { cause });
     });
 
-    this.task = { ...this.task, specPath: plan.specPath, riskClass: plan.riskClass };
+    this.task = { ...this.task, specPath: this.specPath, riskClass: plan.riskClass };
     await this.apply("plan");
     return spec;
   }
 
-  private async implement(cwd: string, spec: string, feedback: string | null, iteration: number): Promise<void> {
+  private async implement(cwd: string, feedback: string | null, iteration: number): Promise<void> {
     const goal =
       `/goal The project check command \`${this.config.check}\` passes in this worktree, ` +
-      "every test listed in the spec exists and passes, and no protected path is modified.";
+      `every test listed in the spec ${this.specPath} exists and passes, and no protected path is modified.`;
     await this.agent("implementer", iteration, {
       cwd,
       prompt: goal,
       appendSystemPrompt: [
         buildProjectContext(this.config, "implementer"),
-        `## Spec (${this.task.specPath})\n\n${spec}`,
+        `## Spec\n\nSpec path: ${this.specPath}\nRead it first.`,
         ...(feedback === null ? [] : [feedback]),
       ].join("\n\n"),
     });
@@ -227,8 +235,8 @@ class TaskRun {
 
   private async check(cwd: string, iteration: number): Promise<{ passed: boolean; output: string }> {
     const startedAt = new Date();
-    const changed = await worktree.changedFiles(this.projectPath, this.task.id);
-    const violations = changed.filter((file) => matchesAny(file, [...this.config.protectedPaths, ...ALWAYS_PROTECTED]));
+    const changed = await worktree.changedFiles(this.projectPath, this.task.id, this.config.mainBranch);
+    const violations = changed.filter((file) => matchesAny(file, [...this.config.agents.protectedPaths, ...ALWAYS_PROTECTED]));
 
     let passed: boolean;
     let output: string;
@@ -236,7 +244,7 @@ class TaskRun {
       passed = false;
       output = [...violations.map((file) => `Protected path modified: ${file}`), "Revert these changes."].join("\n");
     } else {
-      const timeoutMs = this.config.checkTimeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
+      const timeoutMs = CHECK_TIMEOUT_MS;
       // `exec 2>&1` merges stderr into stdout for the whole command, keeping the output in order.
       const result = await runProcess({ command: "sh", args: ["-c", `exec 2>&1\n${this.config.check}`], cwd, timeoutMs });
       passed = result.exitCode === 0 && !result.timedOut;
@@ -265,12 +273,12 @@ class TaskRun {
     checkOutput: string,
     iteration: number,
   ): Promise<ReviewVerdict> {
-    const cited = await extractCitedSources(spec, this.config.sourcesOfTruth, this.projectPath);
+    const cited = await extractCitedSources(spec, this.config.agents.sourcesOfTruth, this.projectPath);
     const result = await this.agent("reviewer", iteration, {
       cwd,
       prompt: [
-        `## Spec (${this.task.specPath})\n\n${spec}`,
-        `## Diff against main\n\n${diff}`,
+        `## Spec\n\nSpec path: ${this.specPath}`,
+        `## Diff against ${this.config.mainBranch}\n\n${diff}`,
         `## Check output\n\n${checkOutput === "" ? "(no output, exit code 0)" : checkOutput}`,
         `## Cited sources of truth\n\n${formatCitedSources(cited)}`,
       ].join("\n\n"),
@@ -280,13 +288,13 @@ class TaskRun {
   }
 
   private async approve(diff: string): Promise<void> {
-    const changed = await worktree.changedFiles(this.projectPath, this.task.id);
+    const changed = await worktree.changedFiles(this.projectPath, this.task.id, this.config.mainBranch);
     const computed = computeRiskClass(this.config.risk, changed, countChangedLines(diff));
     this.task = { ...this.task, riskClass: maxRiskClass(this.task.riskClass, computed) };
 
     // Ask the state machine first: merge only if approval leads to merged.
-    if (transition(this.task, "approve").state === "merged") {
-      const merge = await worktree.merge(this.projectPath, this.task.id);
+    if (transition(this.task, "approve", this.config.budgets).state === "merged") {
+      const merge = await worktree.merge(this.projectPath, this.task.id, this.config.mainBranch);
       if (merge.status === "conflict") {
         throw new RunTaskError(`Merge conflict on ${merge.files.join(", ")}; task left in review`);
       }
@@ -302,15 +310,16 @@ class TaskRun {
     iteration: number,
     options: Pick<RunClaudeOptions, "cwd" | "prompt" | "appendSystemPrompt">,
   ): Promise<RunClaudeResult> {
-    const settings = this.config.agents[role];
-    const model = settings?.model ?? null;
+    const model = this.config.models[role];
     const startedAt = new Date();
     const claudeOptions: RunClaudeOptions = {
       ...options,
       systemPromptFile: join(this.agentsDir, `${role}.md`),
-      allowedTools: settings?.allowedTools ?? DEFAULT_AGENT_SETTINGS[role].allowedTools,
-      timeoutMs: settings?.timeoutMs ?? DEFAULT_AGENT_SETTINGS[role].timeoutMs,
-      ...(model !== null && { model }),
+      // The spec lives outside the agent's cwd.
+      addDirs: [dirname(this.specPath)],
+      allowedTools: AGENT_SETTINGS[role].allowedTools,
+      timeoutMs: AGENT_SETTINGS[role].timeoutMs,
+      model,
     };
 
     let result: RunClaudeResult;
@@ -349,7 +358,7 @@ class TaskRun {
   }
 
   private async apply(event: TaskEvent): Promise<void> {
-    const next = transition(this.task, event);
+    const next = transition(this.task, event, this.config.budgets);
     this.log.transitions.push({ at: new Date().toISOString(), from: this.task.state, event, to: next.state });
     this.task = next;
     await this.save();

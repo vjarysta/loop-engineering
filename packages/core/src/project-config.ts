@@ -6,54 +6,72 @@ export const CONFIG_PATH = join(".loop", "config.json");
 
 const projectRelativePath = z
   .string()
-  .min(1)
+  .min(1, "must not be empty")
   .refine((path) => !isAbsolute(path), "must be relative to the project root")
   .refine((path) => !path.split(/[\\/]/).includes(".."), "must stay inside the project");
 
-const AgentConfigSchema = z.strictObject({
-  model: z.string().min(1).optional(),
-  allowedTools: z.array(z.string().min(1)).optional(),
-  timeoutMs: z.int().positive().optional(),
-  extraInstructions: z.string().optional(),
-});
+/** A glob relative to the project root, matched with path.matchesGlob. */
+const glob = projectRelativePath;
 
-const RiskClassSchema = z.enum(["low", "medium", "high"]);
+const ModelSchema = z.enum(["opus", "sonnet", "haiku"], { error: 'must be "opus", "sonnet" or "haiku"' });
+
+const budget = z.int("must be an integer").min(1, "must be at least 1");
 
 const RiskRulesSchema = z.strictObject({
-  /** A changed file matching `pattern` raises the risk class to at least `class`. */
-  paths: z.array(z.strictObject({ pattern: projectRelativePath, class: RiskClassSchema })).default([]),
-  /** A diff with at least this many added + removed lines raises the risk class to the given level. */
-  diffLines: z
-    .strictObject({ medium: z.int().positive().optional(), high: z.int().positive().optional() })
-    .refine(
-      ({ medium, high }) => medium === undefined || high === undefined || medium <= high,
-      "medium threshold must not exceed high threshold",
-    )
-    .optional(),
+  /** A changed file matching one of these makes the change high risk. */
+  high: z.array(glob),
+  /** …medium risk, unless it also matches a high glob. */
+  medium: z.array(glob),
+  /** …low risk, unless it also matches a medium or high glob. A file matching no list counts as medium. */
+  low: z.array(glob),
+  /** A low-risk change with more added + removed lines than this counts as medium. */
+  maxLowRiskDiffLines: z.int("must be an integer").min(0, "must be at least 0"),
 });
+
+export const AGENT_ROLES = ["planner", "implementer", "reviewer"] as const;
 
 export const ProjectConfigSchema = z.strictObject({
   /** Shell command run by the orchestrator in the worktree; exit code 0 means the checks pass. */
-  check: z.string().min(1),
-  checkTimeoutMs: z.int().positive().optional(),
-  risk: RiskRulesSchema.default({ paths: [] }),
-  sourcesOfTruth: z
-    .array(z.strictObject({ path: projectRelativePath, description: z.string().optional() }))
-    .default([]),
-  protectedPaths: z.array(projectRelativePath).default([]),
-  agents: z
-    .strictObject({
-      planner: AgentConfigSchema.optional(),
-      implementer: AgentConfigSchema.optional(),
-      reviewer: AgentConfigSchema.optional(),
-    })
-    .default({}),
+  check: z.string().min(1, "must be a non-empty shell command"),
+  mainBranch: z
+    .string()
+    .regex(/^[^-\s][^\s]*$/, "must be a branch name (no spaces, not starting with -)")
+    .default("main"),
+  models: z.strictObject({
+    planner: ModelSchema,
+    implementer: ModelSchema,
+    reviewer: ModelSchema,
+    pm: ModelSchema.optional(),
+  }),
+  budgets: z.strictObject({ checkIterations: budget, reviewIterations: budget }),
+  risk: RiskRulesSchema,
+  agents: z.strictObject({
+    sourcesOfTruth: z.array(projectRelativePath),
+    protectedPaths: z.array(glob),
+    extraInstructions: z.strictObject({
+      planner: z.string().optional(),
+      implementer: z.string().optional(),
+      reviewer: z.string().optional(),
+      pm: z.string().optional(),
+    }),
+  }),
+  signals: z
+    .array(
+      z.strictObject({
+        id: z.string().min(1, "must not be empty"),
+        label: z.string().min(1, "must not be empty"),
+        command: z.string().min(1, "must be a non-empty shell command"),
+      }),
+    )
+    .refine((signals) => new Set(signals.map(({ id }) => id)).size === signals.length, "signal ids must be unique")
+    .optional(),
 });
 
 export type ProjectConfig = z.output<typeof ProjectConfigSchema>;
-export type AgentConfig = z.output<typeof AgentConfigSchema>;
 export type RiskRules = z.output<typeof RiskRulesSchema>;
-export type AgentRole = keyof ProjectConfig["agents"];
+export type Budgets = ProjectConfig["budgets"];
+/** The roles run by the orchestrator. `pm` is accepted in the config but has no agent yet. */
+export type AgentRole = (typeof AGENT_ROLES)[number];
 
 export class ProjectConfigError extends Error {
   override readonly name = "ProjectConfigError";
@@ -89,11 +107,9 @@ export async function loadProjectConfig(projectPath: string): Promise<ProjectCon
 
 /** The PROJECT_CONTEXT block given to an agent: shared project rules plus that role's instructions. */
 export function buildProjectContext(config: ProjectConfig, role: AgentRole): string {
-  const sources = config.sourcesOfTruth.map(({ path, description }) =>
-    description === undefined ? `- ${path}` : `- ${path}: ${description}`,
-  );
-  const protectedPaths = config.protectedPaths.map((path) => `- ${path}`);
-  const instructions = config.agents[role]?.extraInstructions?.trim() ?? "";
+  const sources = config.agents.sourcesOfTruth.map((path) => `- ${path}`);
+  const protectedPaths = config.agents.protectedPaths.map((path) => `- ${path}`);
+  const instructions = config.agents.extraInstructions[role]?.trim() ?? "";
 
   return [
     "<PROJECT_CONTEXT>",
