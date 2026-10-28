@@ -29,8 +29,9 @@ export { extractCitedSources, formatCitedSources, headingSlug } from "./sources.
 export type { TaskFile } from "./task-file.js";
 export { loadTaskFile, parseTaskFile, TaskFileError, TaskFileSchema } from "./task-file.js";
 export type { RunLog, RunStep, RunTaskOptions, RunTaskResult, TransitionLogEntry } from "./run-task.js";
-export { runTask, RunTaskError } from "./run-task.js";
+export { runTask, RunTaskError, TaskAlreadyRunError } from "./run-task.js";
 export {
+  cancelTask,
   DEFAULT_RUNS_DIR,
   latestTask,
   listRuns,

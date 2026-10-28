@@ -8,7 +8,7 @@ import { type AgentRole, buildProjectContext, loadProjectConfig, type ProjectCon
 import { computeRiskClass, countChangedLines, matchesAny, maxRiskClass } from "./risk.js";
 import { type ClaudeUsage, runClaude, type RunClaudeOptions, type RunClaudeResult } from "./run-claude.js";
 import { extractCitedSources, formatCitedSources } from "./sources.js";
-import { DEFAULT_RUNS_DIR, runLogPath, specFilePath } from "./task-runs.js";
+import { DEFAULT_RUNS_DIR, latestTask, runLogPath, specFilePath } from "./task-runs.js";
 import { loadTaskFile, type TaskFile } from "./task-file.js";
 import { transition } from "./transition.js";
 import type { Task, TaskEvent, TaskState } from "./types.js";
@@ -92,6 +92,21 @@ export class RunTaskError extends Error {
   override readonly name = "RunTaskError";
 }
 
+/** The task already ran and its state or its leftovers (branch, worktree) forbid a new run. */
+export class TaskAlreadyRunError extends Error {
+  override readonly name = "TaskAlreadyRunError";
+
+  constructor(
+    readonly taskId: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** States a new run may start from: never ran (null), failed before branching, or cancelled. */
+const RERUNNABLE_STATES: ReadonlySet<TaskState | null> = new Set([null, "approved", "cancelled"]);
+
 /**
  * Runs an approved task through planner → implementer → checks → reviewer until it is merged, awaits a
  * human merge, or is escalated. Every state change goes through the task state machine.
@@ -101,9 +116,39 @@ export async function runTask(projectPath: string, taskFile: string, options: Ru
   const taskDef = await loadTaskFile(taskFile);
   const runId = randomUUID();
   const runsDir = resolve(options.runsDir ?? DEFAULT_RUNS_DIR);
+  await assertCanRun(projectPath, taskDef.id, runsDir);
   const logPath = runLogPath(runsDir, taskDef.id, runId);
   const run = new TaskRun(projectPath, config, taskDef, runId, logPath, specFilePath(runsDir, taskDef.id), taskFile, options);
   return run.execute();
+}
+
+/** Throws before anything is written, so the latest run log keeps the task's real state. */
+async function assertCanRun(projectPath: string, taskId: string, runsDir: string): Promise<void> {
+  const state = (await latestTask(taskId, runsDir))?.state ?? null;
+  if (state === "merged") {
+    throw new TaskAlreadyRunError(taskId, `Task ${taskId} is already merged.`);
+  }
+  if (state === "awaiting_merge") {
+    throw new TaskAlreadyRunError(
+      taskId,
+      `Task ${taskId} is awaiting_merge: run \`loop merge ${taskId}\`, or \`loop cancel ${taskId}\` to run it again.`,
+    );
+  }
+  if (!RERUNNABLE_STATES.has(state)) {
+    throw new TaskAlreadyRunError(
+      taskId,
+      `Task ${taskId} is ${String(state)} after a previous run: run \`loop cancel ${taskId}\` before running it again.`,
+    );
+  }
+  if (await worktree.exists(projectPath, taskId)) {
+    throw new TaskAlreadyRunError(
+      taskId,
+      `Branch ${worktree.branchName(taskId)} or worktree ${worktree.worktreePath(projectPath, taskId)} already exists: ` +
+        (state === null
+          ? "delete them (no run log to cancel) before running the task."
+          : `run \`loop cancel ${taskId}\` before running it again.`),
+    );
+  }
 }
 
 class TaskRun {

@@ -2,7 +2,8 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AgentRole } from "./project-config.js";
-import { type RunLog, runTask } from "./run-task.js";
+import { type RunLog, runTask, TaskAlreadyRunError } from "./run-task.js";
+import { cancelTask, listRuns } from "./task-runs.js";
 import {
   approveStep as approve,
   badImplementerStep as bad,
@@ -23,7 +24,7 @@ import {
   snapshotTree,
   specPathFromPrompt,
 } from "./testing.js";
-import { worktreePath } from "./worktree.js";
+import { branchName, worktreePath } from "./worktree.js";
 
 beforeAll(isolateGitEnv);
 afterAll(cleanupFixtures);
@@ -432,5 +433,86 @@ describe("runTask", () => {
       expect(snapshotTree(join(project, ".loop"))).toEqual(before);
       expect(Object.keys(before)).toEqual(["config.json"]);
     });
+  });
+});
+
+describe("runTask on a task that already ran", () => {
+  const highRisk = { risk: { high: ["src/auth/**"] } };
+  const awaitingMerge = (): ScriptStep[] => [
+    planner(),
+    implementer({ "feature.txt": "good\n", "src/auth/a.ts": "x\n" }),
+    approve,
+  ];
+
+  async function rerunError(project: string, taskFile: string, runsDir: string): Promise<TaskAlreadyRunError> {
+    const runsBefore = (await listRuns(TASK_ID, runsDir)).length;
+    const claude = scriptedClaude([]);
+    const error: unknown = await runTask(project, taskFile, { runClaude: claude.runClaude, runsDir }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(TaskAlreadyRunError);
+    // No agent called, no new run log masking the task's real state.
+    expect(claude.calls).toEqual([]);
+    expect((await listRuns(TASK_ID, runsDir)).length).toBe(runsBefore);
+    return error as TaskAlreadyRunError;
+  }
+
+  it("refuses a task awaiting merge and points to loop merge and loop cancel", async () => {
+    const { project, taskFile, runsDir } = makeProject(highRisk);
+    await runTask(project, taskFile, { runClaude: scriptedClaude(awaitingMerge()).runClaude, runsDir });
+
+    const error = await rerunError(project, taskFile, runsDir);
+
+    expect(error.message).toContain(`loop merge ${TASK_ID}`);
+    expect(error.message).toContain(`loop cancel ${TASK_ID}`);
+  });
+
+  it("refuses an escalated task and points to loop cancel", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    await runTask(project, taskFile, { runClaude: scriptedClaude([planner(), bad, bad, bad, bad]).runClaude, runsDir });
+
+    const error = await rerunError(project, taskFile, runsDir);
+
+    expect(error.message).toBe(`Task ${TASK_ID} is escalated after a previous run: run \`loop cancel ${TASK_ID}\` before running it again.`);
+  });
+
+  it("refuses a task left in review by a run error", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    const script = [planner(), good, { role: "reviewer", output: "LGTM!" } as const];
+    await runTask(project, taskFile, { runClaude: scriptedClaude(script).runClaude, runsDir });
+
+    expect((await rerunError(project, taskFile, runsDir)).message).toContain("in_review");
+  });
+
+  it("refuses a merged task", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    await runTask(project, taskFile, { runClaude: scriptedClaude([planner(), good, approve]).runClaude, runsDir });
+
+    expect((await rerunError(project, taskFile, runsDir)).message).toBe(`Task ${TASK_ID} is already merged.`);
+  });
+
+  it("refuses a leftover branch even without a run log", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    git(project, "branch", branchName(TASK_ID));
+
+    expect((await rerunError(project, taskFile, runsDir)).message).toContain(`Branch ${branchName(TASK_ID)}`);
+  });
+
+  it("runs a cancelled task again from scratch", async () => {
+    const { project, taskFile, runsDir } = makeProject(highRisk);
+    await runTask(project, taskFile, { runClaude: scriptedClaude(awaitingMerge()).runClaude, runsDir });
+    await cancelTask(TASK_ID, runsDir);
+
+    const result = await runTask(project, taskFile, { runClaude: scriptedClaude(awaitingMerge()).runClaude, runsDir });
+
+    expect(result.error).toBeNull();
+    expect(result.task.state).toBe("awaiting_merge");
+  });
+
+  it("runs again a task whose previous run failed before branching", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    await runTask(project, taskFile, { runClaude: scriptedClaude([{ role: "planner", output: "no plan" }]).runClaude, runsDir });
+
+    const result = await runTask(project, taskFile, { runClaude: scriptedClaude([planner(), good, approve]).runClaude, runsDir });
+
+    expect(result.task.state).toBe("merged");
   });
 });

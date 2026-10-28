@@ -107,6 +107,21 @@ describe("loop run", () => {
     expect(stdout).toContain(`Task ${FIXTURE_TASK_ID}: merged`);
   });
 
+  it("fails with a clear message when the task already ran, then runs again once cancelled", async () => {
+    const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
+    const cli = makeCli(runsDir);
+    await cli.run(["run", project, taskFile], HIGH_RISK_PATH);
+
+    const rerun = await cli.run(["run", project, taskFile], HIGH_RISK_PATH);
+
+    expect(rerun.code).toBe(1);
+    expect(rerun.stderr).toContain(`Error: Task ${FIXTURE_TASK_ID} is awaiting_merge`);
+    expect(rerun.stderr).not.toContain("already exists");
+
+    await cli.run(["cancel", FIXTURE_TASK_ID]);
+    expect((await cli.run(["run", project, taskFile], HIGH_RISK_PATH)).code).toBe(0);
+  });
+
   it("exits 0 and points to loop merge when the task awaits a human merge", async () => {
     const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
 
@@ -198,6 +213,42 @@ describe("loop merge", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("feature.txt");
+  });
+});
+
+describe("loop cancel", () => {
+  it("cancels a task and deletes its worktree and branch", async () => {
+    const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
+    const cli = makeCli(runsDir);
+    await cli.run(["run", project, taskFile], HIGH_RISK_PATH);
+
+    const { code, stdout } = await cli.run(["cancel", FIXTURE_TASK_ID]);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain(`Task ${FIXTURE_TASK_ID} cancelled`);
+    expect(stdout).toContain(`branch loop/${FIXTURE_TASK_ID}`);
+    expect(git(project, "branch", "--list", `loop/${FIXTURE_TASK_ID}`).trim()).toBe("");
+    expect((await cli.run(["status", FIXTURE_TASK_ID])).stdout).toMatch(/State:\s+cancelled/);
+  });
+
+  it("refuses a merged task", async () => {
+    const { project, taskFile, runsDir } = makeFixtureProject();
+    const cli = makeCli(runsDir);
+    await cli.run(["run", project, taskFile], HAPPY_PATH);
+
+    const { code, stderr } = await cli.run(["cancel", FIXTURE_TASK_ID]);
+
+    expect(code).toBe(1);
+    expect(stderr).toContain(`task ${FIXTURE_TASK_ID} is merged, it cannot be cancelled`);
+  });
+
+  it("fails for an unknown task", async () => {
+    const { runsDir } = makeFixtureProject();
+
+    const { code, stderr } = await makeCli(runsDir).run(["cancel", "nope"]);
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("no run found for task nope");
   });
 });
 

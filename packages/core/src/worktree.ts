@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -120,6 +121,31 @@ export async function remove(projectPath: string, taskId: string): Promise<void>
   assertTaskId(taskId);
   await git(projectPath, ["worktree", "remove", "--force", worktreePath(projectPath, taskId)]);
   await git(projectPath, ["branch", "-D", "-q", branchName(taskId)]);
+}
+
+/** Whether the task branch or its worktree directory exists. */
+export async function exists(projectPath: string, taskId: string): Promise<boolean> {
+  assertTaskId(taskId);
+  return existsSync(worktreePath(projectPath, taskId)) || (await branchExists(projectPath, taskId));
+}
+
+/** Like remove, but only removes what exists: either may be missing after a failed or interrupted run. */
+export async function discard(projectPath: string, taskId: string): Promise<void> {
+  assertTaskId(taskId);
+  const path = worktreePath(projectPath, taskId);
+  if (existsSync(path)) await git(projectPath, ["worktree", "remove", "--force", path]);
+  // Forgets a worktree whose directory was deleted by hand, so its branch can be deleted.
+  await git(projectPath, ["worktree", "prune"]);
+  if (await branchExists(projectPath, taskId)) await git(projectPath, ["branch", "-D", "-q", branchName(taskId)]);
+}
+
+async function branchExists(projectPath: string, taskId: string): Promise<boolean> {
+  try {
+    await git(projectPath, ["rev-parse", "--verify", "-q", `refs/heads/${branchName(taskId)}`]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function assertTaskId(taskId: string): void {

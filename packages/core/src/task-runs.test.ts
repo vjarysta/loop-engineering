@@ -1,10 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runTask } from "./run-task.js";
-import { latestTask, listRuns, MergeConflictError, mergeTask, TaskNotFoundError } from "./task-runs.js";
+import { cancelTask, latestTask, listRuns, MergeConflictError, mergeTask, TaskNotFoundError } from "./task-runs.js";
 import {
   approveStep,
+  badImplementerStep,
   cleanupFixtures,
   FIXTURE_TASK_ID,
   git,
@@ -17,7 +18,7 @@ import {
   writeFile,
 } from "./testing.js";
 import { InvalidTransitionError } from "./transition.js";
-import { worktreePath } from "./worktree.js";
+import { branchName, worktreePath } from "./worktree.js";
 
 beforeAll(isolateGitEnv);
 afterAll(cleanupFixtures);
@@ -109,5 +110,65 @@ describe("mergeTask", () => {
     const { runsDir } = makeFixtureProject();
 
     await expect(mergeTask(FIXTURE_TASK_ID, runsDir)).rejects.toThrow(TaskNotFoundError);
+  });
+});
+
+function hasBranch(project: string): boolean {
+  return git(project, "branch", "--list", branchName(FIXTURE_TASK_ID)).trim() !== "";
+}
+
+describe("cancelTask", () => {
+  it("cancels an awaiting_merge task, deletes its worktree and branch, and records the transition", async () => {
+    const { project, runsDir } = await awaitingMergeProject();
+    const mainBefore = git(project, "rev-parse", "main");
+
+    const task = await cancelTask(FIXTURE_TASK_ID, runsDir);
+
+    expect(task.state).toBe("cancelled");
+    expect(existsSync(worktreePath(project, FIXTURE_TASK_ID))).toBe(false);
+    expect(hasBranch(project)).toBe(false);
+    expect(git(project, "rev-parse", "main")).toBe(mainBefore);
+    const run = (await listRuns(FIXTURE_TASK_ID, runsDir)).at(-1);
+    expect(run?.task.state).toBe("cancelled");
+    expect(run?.transitions.at(-1)).toMatchObject({ from: "awaiting_merge", event: "cancel", to: "cancelled" });
+  });
+
+  it("cancels an escalated task", async () => {
+    const { project, taskFile, runsDir } = makeFixtureProject();
+    const bad = badImplementerStep;
+    await runTask(project, taskFile, { runClaude: scriptedClaude([plannerStep(), bad, bad, bad, bad]).runClaude, runsDir });
+
+    expect((await cancelTask(FIXTURE_TASK_ID, runsDir)).state).toBe("cancelled");
+    expect(hasBranch(project)).toBe(false);
+  });
+
+  it("cancels a task whose run failed before its branch was created", async () => {
+    const { project, taskFile, runsDir } = makeFixtureProject();
+    await runTask(project, taskFile, { runClaude: scriptedClaude([{ role: "planner", output: "no plan" }]).runClaude, runsDir });
+
+    expect((await cancelTask(FIXTURE_TASK_ID, runsDir)).state).toBe("cancelled");
+  });
+
+  it("deletes the branch of a worktree whose directory was removed by hand", async () => {
+    const { project, runsDir } = await awaitingMergeProject();
+    rmSync(worktreePath(project, FIXTURE_TASK_ID), { recursive: true, force: true });
+
+    await cancelTask(FIXTURE_TASK_ID, runsDir);
+
+    expect(hasBranch(project)).toBe(false);
+  });
+
+  it("refuses a merged task", async () => {
+    const { runsDir } = await awaitingMergeProject();
+    await mergeTask(FIXTURE_TASK_ID, runsDir);
+
+    await expect(cancelTask(FIXTURE_TASK_ID, runsDir)).rejects.toThrow(InvalidTransitionError);
+    expect((await latestTask(FIXTURE_TASK_ID, runsDir))?.state).toBe("merged");
+  });
+
+  it("rejects an unknown task", async () => {
+    const { runsDir } = makeFixtureProject();
+
+    await expect(cancelTask("nope", runsDir)).rejects.toThrow(TaskNotFoundError);
   });
 });

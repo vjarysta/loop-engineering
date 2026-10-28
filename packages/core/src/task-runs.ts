@@ -79,6 +79,24 @@ export async function mergeTask(taskId: string, runsDir: string = DEFAULT_RUNS_D
   return next;
 }
 
+/**
+ * Cancels a task that is not terminal: deletes its worktree and its branch if they exist, then records the
+ * transition in its latest run log. Throws InvalidTransitionError for a merged, rejected or cancelled task.
+ */
+export async function cancelTask(taskId: string, runsDir: string = DEFAULT_RUNS_DIR): Promise<Task> {
+  const run = (await listRuns(taskId, runsDir)).at(-1);
+  if (run === undefined) throw new TaskNotFoundError(taskId);
+
+  // Throws for a terminal task, before git is touched.
+  const next = transition(run.task, "cancel", run.config.budgets);
+  await worktree.discard(run.projectPath, taskId);
+
+  run.transitions.push({ at: new Date().toISOString(), from: run.task.state, event: "cancel", to: next.state });
+  run.task = next;
+  await writeFile(runLogPath(runsDir, taskId, run.runId), `${JSON.stringify(run, null, 2)}\n`);
+  return next;
+}
+
 function taskDir(runsDir: string, taskId: string): string {
   if (!worktree.TASK_ID_PATTERN.test(taskId)) throw new worktree.InvalidTaskIdError(taskId);
   return join(runsDir, taskId);

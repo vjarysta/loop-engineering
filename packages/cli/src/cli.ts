@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import {
   AGENT_ROLES,
   buildProjectContext,
+  cancelTask,
   CONFIG_PATH,
   DEFAULT_RUNS_DIR,
   InvalidTransitionError,
@@ -35,6 +36,7 @@ const USAGE = `Usage:
                                       (taskFile: markdown, relative to projectPath)
   loop status <taskId>                Show the state of a task
   loop merge <taskId>                 Merge a task awaiting a human merge into main
+  loop cancel <taskId>                Cancel a task and delete its worktree and its loop/<taskId> branch
   loop runs <taskId>                  Show tokens, cost and duration per step of each run
 
 Specs and run logs live in $LOOP_RUNS_DIR/<taskId>/ (loop-engineering's runs/ by default),
@@ -72,6 +74,8 @@ export async function main(argv: readonly string[], io: CliIo, deps: CliDeps = {
         return await status(io, runsDir, single(args, "status"));
       case "merge":
         return await merge(io, runsDir, single(args, "merge"));
+      case "cancel":
+        return await cancel(io, runsDir, single(args, "cancel"));
       case "runs":
         return await runs(io, runsDir, single(args, "runs"));
       default:
@@ -186,6 +190,24 @@ async function merge(io: CliIo, runsDir: string, taskId: string): Promise<number
     throw error;
   }
   io.stdout(`Task ${taskId} merged into main.\n`);
+  return 0;
+}
+
+async function cancel(io: CliIo, runsDir: string, taskId: string): Promise<number> {
+  let task;
+  try {
+    task = await cancelTask(taskId, runsDir);
+  } catch (error) {
+    if (error instanceof InvalidTransitionError) {
+      io.stderr(`Error: task ${taskId} is ${error.state}, it cannot be cancelled.\n`);
+      return 1;
+    }
+    throw error;
+  }
+  io.stdout(
+    `Task ${taskId} cancelled. Removed worktree ${worktree.worktreePath(task.projectPath, taskId)} ` +
+      `and branch ${worktree.branchName(taskId)} if they existed.\n`,
+  );
   return 0;
 }
 
