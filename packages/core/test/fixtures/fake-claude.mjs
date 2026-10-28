@@ -18,6 +18,9 @@ process.stdin.on("end", () => {
           subtype: "success",
           is_error: false,
           result: JSON.stringify({ args: process.argv.slice(2), stdin, cwd: process.cwd() }),
+          session_id: "session-1",
+          num_turns: 3,
+          permission_denials: [{ tool_name: "Bash" }],
           duration_ms: 1234,
           total_cost_usd: 0.0042,
           usage: {
@@ -26,6 +29,19 @@ process.stdin.on("end", () => {
             cache_creation_input_tokens: 100,
             cache_read_input_tokens: 200,
           },
+        }),
+      );
+      break;
+    case "minimal":
+      process.stdout.write(
+        JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "ok",
+          duration_ms: 1,
+          total_cost_usd: 0,
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
         }),
       );
       break;

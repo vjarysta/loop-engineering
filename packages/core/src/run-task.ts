@@ -17,10 +17,11 @@ import * as worktree from "./worktree.js";
 const DEFAULT_AGENTS_DIR = fileURLToPath(new URL("../../../agents/", import.meta.url));
 
 // Not part of .loop/config.json: tools and timeouts per role, and the check timeout, are fixed here.
-const AGENT_SETTINGS: Readonly<Record<AgentRole, { allowedTools: readonly string[]; timeoutMs: number }>> = {
-  planner: { allowedTools: ["Read", "Glob", "Grep", "Write"], timeoutMs: 15 * 60_000 },
-  implementer: { allowedTools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], timeoutMs: 60 * 60_000 },
-  reviewer: { allowedTools: ["Read", "Glob", "Grep"], timeoutMs: 15 * 60_000 },
+// Each role gets exactly these tools (--tools), all pre-approved (--allowedTools).
+const AGENT_SETTINGS: Readonly<Record<AgentRole, { tools: readonly string[]; timeoutMs: number }>> = {
+  planner: { tools: ["Read", "Glob", "Grep", "Write"], timeoutMs: 15 * 60_000 },
+  implementer: { tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], timeoutMs: 60 * 60_000 },
+  reviewer: { tools: ["Read", "Glob", "Grep"], timeoutMs: 15 * 60_000 },
 };
 const CHECK_TIMEOUT_MS = 15 * 60_000;
 /** The agent must never touch its own configuration, specs or run logs. */
@@ -45,6 +46,10 @@ export interface RunStep {
   readonly usage: ClaudeUsage | null;
   readonly costUsd: number | null;
   readonly durationMs: number;
+  /** Agent steps only: see RunClaudeResult. */
+  readonly sessionId: string | null;
+  readonly numTurns: number | null;
+  readonly permissionDenials: number | null;
   readonly output: string;
   /** Check steps only. */
   readonly passed: boolean | null;
@@ -106,6 +111,8 @@ class TaskRun {
   private readonly log: RunLog;
   private readonly agentsDir: string;
   private readonly callClaude: (options: RunClaudeOptions, role: AgentRole) => Promise<RunClaudeResult>;
+  /** Planner notes (deviations, open questions), carried into the commit messages. */
+  private plannerNotes = "";
 
   constructor(
     private readonly projectPath: string,
@@ -165,7 +172,7 @@ class TaskRun {
     let feedback: string | null = null;
     for (let iteration = 1; ; iteration++) {
       await this.implement(worktreeDir, feedback, iteration);
-      await worktree.commitAll(this.projectPath, this.task.id, `${this.task.id}: implementer iteration ${String(iteration)}`);
+      await worktree.commitAll(this.projectPath, this.task.id, this.commitMessage(iteration));
 
       await this.apply("run_checks");
       const check = await this.check(worktreeDir, iteration);
@@ -193,6 +200,8 @@ class TaskRun {
 
   private async plan(): Promise<string> {
     await mkdir(dirname(this.specPath), { recursive: true });
+    // The planner runs in the project checkout with Write: only the spec, outside it, may change.
+    const before = await worktree.checkoutSnapshot(this.projectPath);
     const result = await this.agent("planner", 1, {
       cwd: this.projectPath,
       prompt: [
@@ -205,6 +214,9 @@ class TaskRun {
       appendSystemPrompt: buildProjectContext(this.config, "planner"),
     });
 
+    if ((await worktree.checkoutSnapshot(this.projectPath)) !== before) {
+      throw new RunTaskError(`Planner modified ${this.projectPath}; it may only write the spec`);
+    }
     const plan = parsePlannerOutput(result.resultText);
     if (resolve(plan.specPath) !== this.specPath) {
       throw new RunTaskError(`Planner wrote ${plan.specPath} instead of ${this.specPath}`);
@@ -214,8 +226,17 @@ class TaskRun {
     });
 
     this.task = { ...this.task, specPath: this.specPath, riskClass: plan.riskClass };
+    this.plannerNotes = plan.notes.trim();
     await this.apply("plan");
     return spec;
+  }
+
+  private commitMessage(iteration: number): string {
+    return [
+      `${this.task.id} — ${this.task.title}`,
+      `Implementer iteration ${String(iteration)}.`,
+      ...(this.plannerNotes === "" ? [] : [`Planner notes:\n${this.plannerNotes}`]),
+    ].join("\n\n");
   }
 
   private async implement(cwd: string, feedback: string | null, iteration: number): Promise<void> {
@@ -259,6 +280,9 @@ class TaskRun {
       usage: null,
       costUsd: null,
       durationMs: Date.now() - startedAt.getTime(),
+      sessionId: null,
+      numTurns: null,
+      permissionDenials: null,
       output,
       passed,
       error: null,
@@ -317,7 +341,8 @@ class TaskRun {
       systemPromptFile: join(this.agentsDir, `${role}.md`),
       // The spec lives outside the agent's cwd.
       addDirs: [dirname(this.specPath)],
-      allowedTools: AGENT_SETTINGS[role].allowedTools,
+      tools: AGENT_SETTINGS[role].tools,
+      allowedTools: AGENT_SETTINGS[role].tools,
       timeoutMs: AGENT_SETTINGS[role].timeoutMs,
       model,
     };
@@ -335,6 +360,9 @@ class TaskRun {
         usage: null,
         costUsd: null,
         durationMs: Date.now() - startedAt.getTime(),
+        sessionId: null,
+        numTurns: null,
+        permissionDenials: null,
         output: "",
         passed: null,
         error: message,
@@ -350,6 +378,9 @@ class TaskRun {
       usage: result.usage,
       costUsd: result.costUsd,
       durationMs: result.durationMs,
+      sessionId: result.sessionId,
+      numTurns: result.numTurns,
+      permissionDenials: result.permissionDenials,
       output: result.resultText,
       passed: null,
       error: null,

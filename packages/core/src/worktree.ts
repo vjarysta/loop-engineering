@@ -93,6 +93,16 @@ export async function merge(projectPath: string, taskId: string, mainBranch: str
 }
 
 /**
+ * Uncommitted state of a checkout (status, untracked files included, and diff against HEAD): two equal
+ * snapshots mean nothing was written to the checkout in between, modulo untracked file contents.
+ */
+export async function checkoutSnapshot(path: string): Promise<string> {
+  const status = await git(path, ["status", "--porcelain", "--untracked-files=all"]);
+  const diff = await git(path, ["diff", "--no-color", "--no-ext-diff", "HEAD"]);
+  return `${status}\0${diff}`;
+}
+
+/**
  * Commits every change of the worktree on the task branch. Returns false when there was nothing to commit.
  * Hooks are skipped: the orchestrator runs the project checks itself.
  */

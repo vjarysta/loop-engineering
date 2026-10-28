@@ -159,6 +159,9 @@ export function scriptedClaude(steps: readonly ScriptStep[]): ScriptedClaude {
         usage: { inputTokens: 10, outputTokens: 20, cacheCreationInputTokens: 30, cacheReadInputTokens: 40 },
         costUsd: 0.01,
         durationMs: 100,
+        sessionId: `session-${String(calls.length)}`,
+        numTurns: 2,
+        permissionDenials: 0,
         raw: { result: output },
       });
     },
@@ -174,8 +177,8 @@ export function specPathFromPrompt(options: RunClaudeOptions): string {
   return match[1];
 }
 
-/** Writes FIXTURE_SPEC where it is told to and reports it with `riskClass`. */
-export function plannerStep(riskClass = "low"): ScriptStep {
+/** Writes FIXTURE_SPEC where it is told to and reports it with `riskClass` and `notes`. */
+export function plannerStep(riskClass = "low", notes = ""): ScriptStep {
   return {
     role: "planner",
     act: (_cwd, options) => {
@@ -185,7 +188,7 @@ export function plannerStep(riskClass = "low"): ScriptStep {
     },
     output: (options) =>
       "Spec written.\n```json\n" +
-      JSON.stringify({ specPath: specPathFromPrompt(options), riskClass, impactedFiles: ["feature.txt"], notes: "" }) +
+      JSON.stringify({ specPath: specPathFromPrompt(options), riskClass, impactedFiles: ["feature.txt"], notes }) +
       "\n```",
   };
 }

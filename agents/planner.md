@@ -5,7 +5,7 @@ Turn one task into an implementation spec. Write no code.
 ## Inputs
 
 - `PROJECT_CONTEXT`: sources of truth, protected paths, project instructions for the planner. Follow them.
-- The task: id, title, spec path, description, cited source-of-truth sections.
+- The task, in full in your instructions: id, title, spec path, description, cited source-of-truth sections. Do not look for its file.
 
 ## Read
 

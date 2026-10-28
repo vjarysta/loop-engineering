@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ClaudeRunError, runClaude } from "./run-claude.js";
+import { BASE_ARGS, ClaudeRunError, runClaude } from "./run-claude.js";
 
 const FAKE_BIN = fileURLToPath(new URL("../test/fixtures/fake-claude.mjs", import.meta.url));
 
@@ -51,8 +51,8 @@ async function waitUntilDead(pid: number, timeoutMs = 2000): Promise<boolean> {
 }
 
 describe("runClaude — invocation", () => {
-  it("only passes print mode and JSON output when no option is given", async () => {
-    expect((await echo()).args).toEqual(["-p", "--output-format", "json"]);
+  it("only passes print mode, JSON output and project-only settings when no option is given", async () => {
+    expect((await echo()).args).toEqual([...BASE_ARGS]);
   });
 
   it("sends the prompt on stdin", async () => {
@@ -66,7 +66,7 @@ describe("runClaude — invocation", () => {
   });
 
   it("passes the model", async () => {
-    expect((await echo({ model: "haiku" })).args).toEqual(["-p", "--output-format", "json", "--model", "haiku"]);
+    expect((await echo({ model: "haiku" })).args).toEqual([...BASE_ARGS, "--model", "haiku"]);
   });
 
   it("appends the content of the system prompt file", async () => {
@@ -74,9 +74,7 @@ describe("runClaude — invocation", () => {
     writeFileSync(file, "You are terse.\nAnswer in French.");
 
     expect((await echo({ systemPromptFile: file })).args).toEqual([
-      "-p",
-      "--output-format",
-      "json",
+      ...BASE_ARGS,
       "--append-system-prompt",
       "You are terse.\nAnswer in French.",
     ]);
@@ -84,9 +82,7 @@ describe("runClaude — invocation", () => {
 
   it("appends an inline system prompt", async () => {
     expect((await echo({ appendSystemPrompt: "Inline rules." })).args).toEqual([
-      "-p",
-      "--output-format",
-      "json",
+      ...BASE_ARGS,
       "--append-system-prompt",
       "Inline rules.",
     ]);
@@ -97,9 +93,7 @@ describe("runClaude — invocation", () => {
     writeFileSync(file, "From file.");
 
     expect((await echo({ systemPromptFile: file, appendSystemPrompt: "Inline rules." })).args).toEqual([
-      "-p",
-      "--output-format",
-      "json",
+      ...BASE_ARGS,
       "--append-system-prompt",
       "From file.\n\nInline rules.",
     ]);
@@ -108,21 +102,31 @@ describe("runClaude — invocation", () => {
   it("passes allowed tools last, one argument each, so they cannot swallow other flags", async () => {
     const args = (await echo({ model: "haiku", allowedTools: ["Read", "Bash(git *)"] })).args;
 
-    expect(args).toEqual(["-p", "--output-format", "json", "--model", "haiku", "--allowedTools", "Read", "Bash(git *)"]);
+    expect(args).toEqual([...BASE_ARGS, "--model", "haiku", "--allowedTools", "Read", "Bash(git *)"]);
   });
 
   it("grants extra directories before the allowed tools, both variadic lists ending at the next flag", async () => {
     const args = (await echo({ addDirs: ["/runs/task-1", "/shared"], allowedTools: ["Read"] })).args;
 
-    expect(args).toEqual(["-p", "--output-format", "json", "--add-dir", "/runs/task-1", "/shared", "--allowedTools", "Read"]);
+    expect(args).toEqual([...BASE_ARGS, "--add-dir", "/runs/task-1", "/shared", "--allowedTools", "Read"]);
   });
 
   it("omits --add-dir for an empty list", async () => {
-    expect((await echo({ addDirs: [] })).args).toEqual(["-p", "--output-format", "json"]);
+    expect((await echo({ addDirs: [] })).args).toEqual([...BASE_ARGS]);
+  });
+
+  it("restricts the tool set before pre-approving tools", async () => {
+    const args = (await echo({ tools: ["Read", "Grep"], allowedTools: ["Read", "Grep"] })).args;
+
+    expect(args).toEqual([...BASE_ARGS, "--tools", "Read", "Grep", "--allowedTools", "Read", "Grep"]);
+  });
+
+  it("disables every tool for an empty tool set", async () => {
+    expect((await echo({ tools: [] })).args).toEqual([...BASE_ARGS, "--tools", ""]);
   });
 
   it("omits --allowedTools for an empty list", async () => {
-    expect((await echo({ allowedTools: [] })).args).toEqual(["-p", "--output-format", "json"]);
+    expect((await echo({ allowedTools: [] })).args).toEqual([...BASE_ARGS]);
   });
 });
 
@@ -134,8 +138,17 @@ describe("runClaude — result", () => {
       costUsd: 0.0042,
       durationMs: 1234,
       usage: { inputTokens: 10, outputTokens: 5, cacheCreationInputTokens: 100, cacheReadInputTokens: 200 },
+      sessionId: "session-1",
+      numTurns: 3,
+      permissionDenials: 1,
       raw: { type: "result", subtype: "success", total_cost_usd: 0.0042 },
     });
+  });
+
+  it("leaves the session fields null when claude omits them", async () => {
+    const result = await runClaude({ cwd: makeTmpDir(), prompt: "mode:minimal", timeoutMs: 5000, bin: FAKE_BIN });
+
+    expect(result).toMatchObject({ sessionId: null, numTurns: null, permissionDenials: null });
   });
 });
 

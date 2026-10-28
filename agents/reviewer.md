@@ -12,6 +12,8 @@ Review one change. Edit nothing.
 
 Judge only from these inputs. Assume nothing about intent beyond them.
 
+Your tools are read-only: you cannot run commands. Check computed values against the tests in the diff and the check output, not by executing code.
+
 ## Verify
 
 1. The diff satisfies every acceptance criterion and does nothing outside the spec.

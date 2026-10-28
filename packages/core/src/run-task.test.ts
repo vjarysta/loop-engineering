@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AgentRole } from "./project-config.js";
@@ -107,6 +107,76 @@ describe("runTask", () => {
     expect(reviewerPrompt).not.toContain("Unrelated requirement.");
   });
 
+  it("restricts each role to its tools and pre-approves exactly those", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    const claude = scriptedClaude([planner(), good, approve]);
+
+    await runTask(project, taskFile, { runClaude: claude.runClaude, runsDir });
+
+    const tools = Object.fromEntries(claude.calls.map(({ role, options }) => [role, [options.tools, options.allowedTools]]));
+    const readOnly = ["Read", "Glob", "Grep"];
+    expect(tools).toEqual({
+      planner: [
+        [...readOnly, "Write"],
+        [...readOnly, "Write"],
+      ],
+      implementer: [
+        [...readOnly, "Edit", "Write", "Bash"],
+        [...readOnly, "Edit", "Write", "Bash"],
+      ],
+      reviewer: [readOnly, readOnly],
+    });
+  });
+
+  it("commits each iteration with the task title and the planner notes", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    const claude = scriptedClaude([planner("low", "Interpreted §2 in ms."), good, approve]);
+
+    await runTask(project, taskFile, { runClaude: claude.runClaude, runsDir });
+
+    expect(git(project, "log", "-1", "--format=%B", "main^2").trim()).toBe(
+      `${TASK_ID} — Say good\n\nImplementer iteration 1.\n\nPlanner notes:\nInterpreted §2 in ms.`,
+    );
+  });
+
+  it("leaves the planner notes out of the commit message when there are none", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    const claude = scriptedClaude([planner(), good, approve]);
+
+    await runTask(project, taskFile, { runClaude: claude.runClaude, runsDir });
+
+    expect(git(project, "log", "-1", "--format=%B", "main^2").trim()).toBe(`${TASK_ID} — Say good\n\nImplementer iteration 1.`);
+  });
+
+  it("fails the run when the planner writes into the project checkout", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    const intruder: ScriptStep = {
+      ...planner(),
+      act: (cwd, options) => {
+        planner().act?.(cwd, options);
+        writeFileSync(join(cwd, "spec.md"), "misplaced");
+      },
+    };
+    const claude = scriptedClaude([intruder]);
+
+    const result = await runTask(project, taskFile, { runClaude: claude.runClaude, runsDir });
+
+    expect(result.error).toMatch(/Planner modified .+; it may only write the spec/);
+    expect(result.task.state).toBe("approved");
+    expect(existsSync(worktreePath(project, TASK_ID))).toBe(false);
+  });
+
+  it("tolerates changes already present in the project checkout before planning", async () => {
+    const { project, taskFile, runsDir } = makeProject();
+    writeFileSync(join(project, "notes.txt"), "local draft\n");
+    const claude = scriptedClaude([planner("high"), good, approve]);
+
+    const result = await runTask(project, taskFile, { runClaude: claude.runClaude, runsDir });
+
+    expect(result.error).toBeNull();
+    expect(result.task.state).toBe("awaiting_merge");
+  });
+
   it("logs every step and every transition", async () => {
     const { project, taskFile, runsDir } = makeProject();
     const claude = scriptedClaude([planner(), good, approve]);
@@ -122,9 +192,19 @@ describe("runTask", () => {
       usage: { inputTokens: 10, outputTokens: 20, cacheCreationInputTokens: 30, cacheReadInputTokens: 40 },
       costUsd: 0.01,
       durationMs: 100,
+      sessionId: "session-2",
+      numTurns: 2,
+      permissionDenials: 0,
       output: "Done.",
     });
-    expect(log.steps[2]).toMatchObject({ role: "check", model: null, usage: null, costUsd: null, passed: true });
+    expect(log.steps[2]).toMatchObject({
+      role: "check",
+      model: null,
+      usage: null,
+      costUsd: null,
+      sessionId: null,
+      passed: true,
+    });
     expect(log.transitions.map(({ from, event, to }) => `${from} -${event}-> ${to}`)).toEqual([
       "approved -plan-> planned",
       "planned -start-> in_progress",

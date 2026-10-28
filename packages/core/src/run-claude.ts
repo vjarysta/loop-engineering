@@ -10,6 +10,9 @@ export interface RunClaudeOptions {
   /** Passed to --append-system-prompt, after the content of systemPromptFile. */
   readonly appendSystemPrompt?: string;
   readonly model?: string;
+  /** Built-in tools available at all (--tools); an empty list disables every tool. */
+  readonly tools?: readonly string[];
+  /** Tools pre-approved without a permission prompt (--allowedTools); it does not restrict the tool set. */
   readonly allowedTools?: readonly string[];
   /** Directories outside cwd the tools may access (--add-dir). */
   readonly addDirs?: readonly string[];
@@ -31,6 +34,11 @@ export interface RunClaudeResult {
   readonly usage: ClaudeUsage;
   readonly costUsd: number;
   readonly durationMs: number;
+  /** The transcript is in ~/.claude/projects/<escaped cwd>/<sessionId>.jsonl. */
+  readonly sessionId: string | null;
+  readonly numTurns: number | null;
+  /** Tool calls denied during the session. */
+  readonly permissionDenials: number | null;
   readonly raw: Readonly<Record<string, unknown>>;
 }
 
@@ -92,8 +100,14 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunClaudeRes
   return parseOutput(stdout, stderr);
 }
 
+/**
+ * Agents load only the project's settings: the user's plugins, hooks, MCP servers, permissions, language
+ * and CLAUDE.md never reach them. --bare would isolate further but ignores OAuth, i.e. the subscription.
+ */
+export const BASE_ARGS = ["-p", "--output-format", "json", "--setting-sources", "project,local"] as const;
+
 async function buildArgs(options: RunClaudeOptions): Promise<string[]> {
-  const args = ["-p", "--output-format", "json"];
+  const args: string[] = [...BASE_ARGS];
   if (options.model !== undefined) {
     args.push("--model", options.model);
   }
@@ -104,10 +118,13 @@ async function buildArgs(options: RunClaudeOptions): Promise<string[]> {
   if (systemPrompt.length > 0) {
     args.push("--append-system-prompt", systemPrompt.join("\n\n"));
   }
-  // --add-dir and --allowedTools are variadic: each list ends at the next flag, and the prompt goes
-  // through stdin so nothing positional can be swallowed.
+  // --add-dir, --tools and --allowedTools are variadic: each list ends at the next flag, and the prompt
+  // goes through stdin so nothing positional can be swallowed.
   if (options.addDirs !== undefined && options.addDirs.length > 0) {
     args.push("--add-dir", ...options.addDirs);
+  }
+  if (options.tools !== undefined) {
+    args.push("--tools", ...(options.tools.length > 0 ? options.tools : [""]));
   }
   if (options.allowedTools !== undefined && options.allowedTools.length > 0) {
     args.push("--allowedTools", ...options.allowedTools);
@@ -156,6 +173,9 @@ function parseOutput(stdout: string, stderr: string): RunClaudeResult {
     },
     costUsd,
     durationMs,
+    sessionId: typeof raw["session_id"] === "string" ? raw["session_id"] : null,
+    numTurns: typeof raw["num_turns"] === "number" ? raw["num_turns"] : null,
+    permissionDenials: Array.isArray(raw["permission_denials"]) ? raw["permission_denials"].length : null,
     raw,
   };
 }
