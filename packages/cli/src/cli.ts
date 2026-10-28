@@ -32,6 +32,7 @@ export interface CliDeps {
 const USAGE = `Usage:
   loop validate <projectPath>         Validate .loop/config.json and print each role's PROJECT_CONTEXT
   loop run <projectPath> <taskFile>   Run a task through planner, implementer, checks and reviewer
+                                      (taskFile: markdown, relative to projectPath)
   loop status <taskId>                Show the state of a task
   loop merge <taskId>                 Merge a task awaiting a human merge into main
   loop runs <taskId>                  Show tokens, cost and duration per step of each run
@@ -118,10 +119,11 @@ async function run(
   [projectArg, taskFile]: readonly [string, string],
 ): Promise<number> {
   const projectPath = resolve(projectArg);
-  const { id } = await loadTaskFile(taskFile);
+  const taskPath = resolve(projectPath, taskFile);
+  const { id } = await loadTaskFile(taskPath);
   io.stdout(`Running task ${id} in ${projectPath}…\n`);
 
-  const result = await runTask(projectPath, taskFile, {
+  const result = await runTask(projectPath, taskPath, {
     runsDir,
     ...(deps.runClaude !== undefined && { runClaude: deps.runClaude }),
   });

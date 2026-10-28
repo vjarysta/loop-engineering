@@ -98,6 +98,15 @@ describe("loop run", () => {
     expect(stdout).toMatch(new RegExp(`Run log: ${join(runsDir, FIXTURE_TASK_ID)}/.+\\.json`));
   });
 
+  it("resolves a relative task file against the project path", async () => {
+    const { project, runsDir } = makeFixtureProject();
+
+    const { code, stdout } = await makeCli(runsDir).run(["run", project, "../task.md"], HAPPY_PATH);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain(`Task ${FIXTURE_TASK_ID}: merged`);
+  });
+
   it("exits 0 and points to loop merge when the task awaits a human merge", async () => {
     const { project, taskFile, runsDir } = makeFixtureProject(HIGH_RISK_CONFIG);
 

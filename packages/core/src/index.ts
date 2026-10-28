@@ -27,7 +27,7 @@ export { computeRiskClass, countChangedLines, matchesAny, maxRiskClass } from ".
 export type { CitedSource } from "./sources.js";
 export { extractCitedSources, formatCitedSources, headingSlug } from "./sources.js";
 export type { TaskFile } from "./task-file.js";
-export { loadTaskFile, TaskFileError, TaskFileSchema } from "./task-file.js";
+export { loadTaskFile, parseTaskFile, TaskFileError, TaskFileSchema } from "./task-file.js";
 export type { RunLog, RunStep, RunTaskOptions, RunTaskResult, TransitionLogEntry } from "./run-task.js";
 export { runTask, RunTaskError } from "./run-task.js";
 export {

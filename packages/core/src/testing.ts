@@ -101,11 +101,8 @@ export function makeFixtureProject(config: Readonly<Record<string, unknown>> = {
   git(project, "add", "-A");
   git(project, "commit", "-q", "-m", "initial");
 
-  const taskFile = join(parent, "task.json");
-  writeFileSync(
-    taskFile,
-    JSON.stringify({ id: FIXTURE_TASK_ID, title: "Say good", description: "Implement docs/PRD.md#feature." }),
-  );
+  const taskFile = join(parent, "task.md");
+  writeFileSync(taskFile, `# ${FIXTURE_TASK_ID} — Say good\n\n## Objectif\nImplement docs/PRD.md#feature.\n`);
   const runsDir = join(parent, "runs");
   mkdirSync(runsDir);
   return { project, taskFile, runsDir };
